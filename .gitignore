@@ -1,0 +1,23 @@
+/references/
+
+# Binaries
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries and coverage
+*.test
+*.out
+coverage.*
+
+# Go build/module cache (direnv `layout go` points GOPATH here)
+/.direnv/
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
