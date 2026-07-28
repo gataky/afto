@@ -22,6 +22,9 @@ daemon and production zsh plugin) is fully specified but not implemented.
 - `plans/phase-1.md` — the complete Phase 1 implementation spec: wire protocol,
   SQLite schema, scoring formula, milestones, and acceptance gates. Follow it
   when building the daemon/plugin.
+- `docs/protocol.md` — narrative wire-protocol reference: who the clients are,
+  the keystroke round trip, why requests are JSON but ZLE responses are TSV,
+  one-in-flight flow control, and protocol evolution rules.
 - `poc/` — the validated Phase 0 proof of concept. **Do not modify**; it is the
   reference for the UI contract. Production shell code goes in `shell/zsh/`.
 - `references/IRIS/` — read-only checkout of IRIS for study (gitignored, 0BSD

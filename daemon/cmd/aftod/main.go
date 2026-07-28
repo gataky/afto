@@ -1,4 +1,19 @@
 // Command aftod is the afto suggestion daemon and its CLI.
+//
+// One binary, two roles:
+//
+//   - "aftod serve" runs the daemon: a per-user process that owns the
+//     SQLite history store and answers suggestion queries over a unix
+//     socket. It is started lazily by the zsh plugin on first use (there is
+//     no launchd/systemd unit) and exits on its own after an idle period.
+//
+//   - "import", "query" and "ping" act as clients of a running daemon (or,
+//     for import, operate on the store directly) for bootstrap, testing and
+//     diagnostics.
+//
+// The interactive consumer is shell/zsh/afto.plugin.zsh, which talks to the
+// daemon from inside zsh. Architecture: DESIGN.md; Phase 1 scope and
+// acceptance gates: plans/phase-1.md.
 package main
 
 import (

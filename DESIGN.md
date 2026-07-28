@@ -228,6 +228,8 @@ timeout_ms = 40
 
 ### 3.4 Shell↔daemon transport
 
+(Full narrative reference with wire examples: `docs/protocol.md`.)
+
 Unix socket, JSON lines. The zsh client connects via `zmodload zsh/net/socket`
 (`zsocket`), registers the fd with `zle -F fd handler`; ZLE invokes the handler when
 the response arrives — typing never blocks. If the daemon is down/slow: silently no
