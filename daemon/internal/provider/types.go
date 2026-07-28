@@ -9,10 +9,12 @@
 // merged and ranked; stragglers are abandoned for that request. This is how
 // a slow or broken source degrades itself instead of the user's prompt.
 //
-// Nothing in this package touches the wire or the database: ipc converts
-// requests into a Query, providers consult whatever backend they own, and
-// the daemon composes the two. Keep it dependency-free in that direction —
-// provider must never import ipc or store.
+// Nothing in this package touches the wire: ipc converts requests into a
+// Query, providers consult whatever backend they own, and the daemon
+// composes the two. provider must never import ipc (the dependency points
+// the other way). The built-in providers do read the store, but only
+// through the narrow statsReader interface defined here, so tests fake the
+// data layer instead of standing up SQLite.
 package provider
 
 import "context"
