@@ -295,6 +295,32 @@ done
 	}
 }
 
+func TestStartWarmsTheProcess(t *testing.T) {
+	h := host(t, script(t, echoPlugin), time.Second)
+	h.Start()
+	if h.proc == nil {
+		t.Fatal("Start did not spawn the plugin")
+	}
+	pid := h.proc.cmd.Process.Pid
+
+	// The warmed process is the one that serves the first request — that is
+	// the whole point: no cold exec inside the latency budget.
+	if got, _ := h.Suggest(context.Background(), provider.Query{Buffer: "x"}); len(got) != 1 {
+		t.Fatalf("got %+v", got)
+	}
+	if h.proc.cmd.Process.Pid != pid {
+		t.Fatal("first request respawned instead of reusing the warmed process")
+	}
+}
+
+func TestStartOnBrokenPluginIsHarmless(t *testing.T) {
+	h := host(t, filepath.Join(t.TempDir(), "missing"), time.Second)
+	h.Start() // must not panic, must not block
+	if h.proc != nil {
+		t.Fatal("a missing binary must not leave a process behind")
+	}
+}
+
 func TestMissingBinaryIsSilentAndBackedOff(t *testing.T) {
 	h := host(t, filepath.Join(t.TempDir(), "does-not-exist"), time.Second)
 

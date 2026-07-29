@@ -39,8 +39,31 @@ type Config struct {
 	LogLevel        string    `toml:"log_level"`
 	Providers       Providers `toml:"providers"`
 	Project         Project   `toml:"project"`
+	Plugins         []Plugin  `toml:"plugin"`
 	Redact          Redact    `toml:"redact"`
 }
+
+// Plugin is one external suggestion source, run as a subprocess speaking
+// JSON lines over stdio (DESIGN.md §3.2, docs/plugins.md).
+//
+// Command is executed directly, never through a shell: Args is a list, so
+// there are no quoting or word-splitting rules to get wrong, and no
+// injection surface. Configuring a plugin means letting that program see
+// your command lines — a trust decision, documented as such.
+//
+// Enabled uses a pointer so an omitted key can mean "true" while an
+// explicit `enabled = false` still disables: a plugin someone bothered to
+// configure should run unless they said otherwise.
+type Plugin struct {
+	Name      string   `toml:"name"`
+	Command   string   `toml:"command"`
+	Args      []string `toml:"args"`
+	TimeoutMS int      `toml:"timeout_ms"`
+	Enabled   *bool    `toml:"enabled"`
+}
+
+// On reports whether the plugin should be wired up.
+func (p Plugin) On() bool { return p.Enabled == nil || *p.Enabled }
 
 // Providers toggles built-in suggestion sources. Toggles are read at daemon
 // start; unlike the other keys they do not hot-reload (the provider set is

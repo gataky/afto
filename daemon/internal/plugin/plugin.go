@@ -392,6 +392,21 @@ func (h *Host) penalize() {
 	h.nextTry = time.Now().Add(h.backoff)
 }
 
+// Start spawns the subprocess ahead of the first request.
+//
+// Without this the first keystroke after the daemon comes up races a cold
+// fork+exec against the latency budget, and typically loses — the plugin
+// would silently contribute nothing exactly when the user is most likely to
+// be watching for it. Failure here is not an error: the normal lazy path
+// (with its backoff) still applies on the first real request.
+func (h *Host) Start() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, err := h.ensureProc(); err != nil {
+		h.log.Debug("plugin pre-start failed; will retry lazily", "err", err)
+	}
+}
+
 // Close stops the subprocess. Called on daemon shutdown.
 func (h *Host) Close() {
 	h.mu.Lock()
