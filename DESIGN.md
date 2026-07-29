@@ -118,9 +118,11 @@ not free (emacs `forward-word`); it participates only via the wrap-at-EOL rule.
 - **Coexistence is free.** afto never binds `^T`, `^R`, or `Alt+C`. fzf widgets edit
   `$BUFFER` directly; our `line-pre-redraw` hook just observes the result like any
   other edit (and will happily ghost-suggest on top of an fzf-inserted path).
-- **Integration (optional widget, post-Phase 2):** `aftod query --list | fzf` →
-  insert pick into `$BUFFER`. Later: feed afto's frecency-ranked history to fzf's
-  `^R` for users who prefer that picker. Both are additive opt-ins.
+- **Integration (shipped in Phase 4, opt-in):** the `afto-fzf` widget pipes
+  `aftod list --prefix "$LBUFFER"` into fzf and inserts the pick. It is defined
+  but **bound to nothing** — binding `^R` is the user's choice, since never
+  claiming that key is what makes coexistence free. `aftod query --list` serves
+  the same shape from the live provider stack. Details: `docs/fzf.md`.
 
 ### 2.4 Isolation guarantees
 
@@ -219,9 +221,14 @@ timeout_ms = 40
 ```
 
 - Request/response are the `Query`/`Candidate` JSON shapes above, one JSON object
-  per line, with `v` for protocol versioning.
-- Long-lived process, restarted with backoff on crash; **circuit breaker** (repeated
-  timeouts → plugin benched, prompt never blocks).
+  per line, with `v` for protocol versioning. The `id` is echoed so a late answer
+  is discarded rather than attributed to the next request; `source` is stamped by
+  the host, so a plugin cannot present itself as a built-in.
+- Long-lived process, started with the daemon (a cold `fork`+`exec` loses its race
+  against the latency budget), restarted with backoff on crash; **circuit breaker**
+  (repeated failures → plugin benched for a cooldown, then a half-open probe).
+  Each layer answers a different failure: slow, dead, persistently broken.
+- Full reference for plugin authors: `docs/plugins.md`.
 - Why not alternatives: Go's stdlib `plugin` package is version-locked and brittle;
   hashicorp/go-plugin (gRPC) is solid but heavy for line-of-text suggestions.
   Subprocess-JSON means a plugin can be a 10-line Python script, and the shell
@@ -289,9 +296,11 @@ afto/
   `transition` provider (next-command rows, reached by explicit `^O` on an empty
   prompt — nothing is shown unprompted; `AFTO_EMPTY_ROWS` opts into passive
   rows), alias-expansion notes. (`plans/phase-3-report.md`)
-- **Phase 4 — Plugin host + fzf widget:** subprocess plugin runtime with circuit
-  breaker + a sample plugin; optional `aftod query --list | fzf` widget and
-  frecency-fed `^R` alternative.
+- **Phase 4 — Plugin host + fzf widget (done):** subprocess plugin runtime with
+  circuit breaker + a sample plugin (`afto-make-targets`); `aftod list` /
+  `aftod query --list` and the opt-in, unbound `afto-fzf` widget as the
+  frecency-fed `^R` alternative. (`plans/phase-4-report.md`, `docs/plugins.md`,
+  `docs/fzf.md`)
 - **Phase 5 — Breadth (as desired):** bash explicit-invoke client wired to the
   daemon, ble.sh source, fish autosuggestion source, vi-mode polish, `ai` provider
   behind explicit opt-in.

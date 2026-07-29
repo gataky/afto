@@ -69,6 +69,40 @@ export HISTFILE=$D/seedhist
 
 mkdir -p $D/fix && touch $D/fix/.zshrc-fake   # fixture for the native-TAB test
 
+# Plugin fixtures (Phase 4). Three plugins are configured for the whole
+# session: the real sample, one that hangs forever, and one that exits
+# immediately. Every scenario below therefore runs with broken plugins
+# present — if a plugin could hurt the prompt, the ENTIRE suite would show
+# it, not just the plugin scenarios.
+# Exactly ONE target matches the prefix the test types. With two, the top
+# candidate would change mid-word and ZLE would never repaint the winning
+# row contiguously (see plans/phase-2-report.md on partial repaints), so
+# the assertion would be testing the terminal, not the plugin.
+# Recipes run under sh, where `print` does not exist — use echo.
+mkdir -p $D/mk
+{
+  print "e2e-plugin-target:"
+  print "\t@echo PLUGIN''-RAN"
+  print "zzz-unrelated:"
+  print "\t@true"
+} > $D/mk/Makefile
+print '#!/bin/sh\nwhile IFS= read -r l; do sleep 30; done' > $D/hang.sh
+print '#!/bin/sh\nexit 1' > $D/dead.sh
+chmod +x $D/hang.sh $D/dead.sh
+{
+  print "[[plugin]]"
+  print "name = \"make-targets\""
+  print "command = \"$REPO/bin/afto-make-targets\""
+  print "timeout_ms = 400"
+  print "[[plugin]]"
+  print "name = \"hangs\""
+  print "command = \"$D/hang.sh\""
+  print "[[plugin]]"
+  print "name = \"dies\""
+  print "command = \"$D/dead.sh\""
+} > $D/cfg.toml
+[[ -x $REPO/bin/afto-make-targets ]] || { print "harness: bin/afto-make-targets missing — run make build"; exit 2 }
+
 typeset -g CAP="" FAILS=0
 pass() { print -r -- "PASS: $1" }
 fail() { print -r -- "FAIL: $1"; (( FAILS++ )) }
@@ -322,6 +356,80 @@ if grep -q 'record.*"cmd":"tq alias-marker"' $D/client.trace; then
   pass "accepting an annotated row takes the command, not the note"
 else
   fail "accepting an annotated row takes the command, not the note"
+fi
+
+# --- S16: an external plugin contributes candidates --------------------------------
+# The sample plugin suggests Makefile targets from the query's cwd — the
+# thing built-ins structurally cannot do, since afto has never seen this
+# directory's targets run.
+zpty -w z "cd $D/mk"
+sleep 0.6; drain
+typeslow "make e2e-plugin-t"
+sleep 1.0; drain
+if stripped | grep -q -- "▸ make e2e-plugin-target"; then
+  pass "plugin candidate rendered as a row"
+else
+  fail "plugin candidate rendered as a row"
+fi
+if stripped | grep -q -- "make target"; then
+  pass "plugin note rendered beside its row"
+else
+  fail "plugin note rendered beside its row"
+fi
+# Accepting must take exactly the plugin's text — nothing about a candidate
+# coming from a subprocess weakens the accept contract.
+zpty -wn z $'\x1d'
+sleep 0.4; enter
+sleep 1.2; drain
+if (( $(count_marker PLUGIN-RAN) == 1 )); then
+  pass "accepted plugin candidate executed exactly"
+else
+  fail "accepted plugin candidate executed exactly"
+fi
+
+# --- S17: broken plugins change nothing --------------------------------------------
+# A hanging and a crashing plugin have been configured all session. Prove
+# ordinary suggestions still work with them present, and that the daemon
+# logged the breaker rather than leaking anything to the terminal.
+zpty -w z "cd $D"
+sleep 0.5; drain
+mark=$(( ${#CAP} + 1 ))
+typeslow "true menupick-al"
+sleep 0.8; drain
+if seg_has_ghost $mark; then
+  pass "history suggestions unaffected by broken plugins"
+else
+  fail "history suggestions unaffected by broken plugins"
+fi
+enter          # leave a clean line: anything typed here would prefix the
+sleep 0.6      # next scenario's command, which zpty appends to the buffer
+drain
+if [[ -f $XDG_STATE_HOME/afto/aftod.log ]] && grep -q "plugin benched" $XDG_STATE_HOME/afto/aftod.log; then
+  pass "repeatedly failing plugin was benched"
+else
+  # Not fatal on its own: benching needs enough requests to trip. Report it
+  # so a silent regression in the breaker is still visible.
+  print "NOTE: breaker did not trip during this run (not enough failing requests)"
+fi
+
+# --- S18: the fzf widget exists but claims nothing ---------------------------------
+# `zle -l` prints "name (implementing-function)" for a widget defined with
+# `zle -N name fn`, so match the start of the line, not the whole line.
+zpty -w z "zle -l | grep -q '^afto-fzf' && print FZF''-WIDGET-OK"
+sleep 0.8; drain
+if (( $(count_marker FZF-WIDGET-OK) == 1 )); then
+  pass "afto-fzf widget is defined"
+else
+  fail "afto-fzf widget is defined"
+fi
+# Distinct markers, not BOUND/UNBOUND: markers are matched end-anchored, and
+# "UNBOUND" ends with "BOUND".
+zpty -w z "bindkey | grep -q afto-fzf && print FZF-IS''-CLAIMED || print FZF-NOT''-CLAIMED"
+sleep 0.8; drain
+if (( $(count_marker FZF-NOT-CLAIMED) >= 1 && $(count_marker FZF-IS-CLAIMED) == 0 )); then
+  pass "afto-fzf is bound to nothing by default"
+else
+  fail "afto-fzf is bound to nothing by default"
 fi
 
 # --- S12: coexistence — fzf/zsh-syntax-highlighting loaded alongside afto ----------
