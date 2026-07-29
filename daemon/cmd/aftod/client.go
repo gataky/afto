@@ -67,21 +67,27 @@ func cmdPing(args []string) error {
 func cmdQuery(args []string) error {
 	fs := flag.NewFlagSet("query", flag.ExitOnError)
 	socket := fs.String("socket", socketPath(), "daemon socket path")
-	buffer := fs.String("buffer", "", "command-line prefix to suggest for (required)")
+	buffer := fs.String("buffer", "", "command-line prefix to suggest for")
 	cwd := fs.String("cwd", "", "working directory context")
 	limit := fs.Int("limit", 0, "max candidates (0 = all, capped at 10)")
+	// An empty buffer is a real query, not a mistake: it asks what usually
+	// comes NEXT, which needs a session to know what came last.
+	session := fs.String("session", "", "session id, for empty-buffer next-command prediction")
+	recent := fs.String("recent", "", "the command just executed (overrides the session's stored tail)")
 	if err := fs.Parse(args); err != nil {
 		return err
-	}
-	if *buffer == "" {
-		return fmt.Errorf("query: --buffer is required")
 	}
 	if *cwd == "" {
 		*cwd, _ = os.Getwd()
 	}
+	var recents []string
+	if *recent != "" {
+		recents = []string{*recent}
+	}
 	line, err := roundTrip(*socket, ipc.Request{
 		V: ipc.V, Type: ipc.TypeSuggest, ID: 1,
 		Buffer: *buffer, Cursor: len(*buffer), CWD: *cwd, Limit: *limit,
+		Session: *session, Recent: recents,
 	})
 	if err != nil {
 		return err

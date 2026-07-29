@@ -14,6 +14,7 @@ import (
 
 	"github.com/gataky/afto/daemon/internal/config"
 	"github.com/gataky/afto/daemon/internal/ipc"
+	"github.com/gataky/afto/daemon/internal/project"
 	"github.com/gataky/afto/daemon/internal/provider"
 	"github.com/gataky/afto/daemon/internal/store"
 )
@@ -154,6 +155,9 @@ func runServe(ctx context.Context, o serveOpts) error {
 	if pc.Frecency {
 		providers = append(providers, provider.NewFrecency(st))
 	}
+	if pc.Transition {
+		providers = append(providers, provider.NewTransition(st))
+	}
 	budget := func() time.Duration {
 		return time.Duration(mgr.Get().LatencyBudgetMS) * time.Millisecond
 	}
@@ -163,7 +167,13 @@ func runServe(ctx context.Context, o serveOpts) error {
 	if err != nil {
 		return err
 	}
-	srv := ipc.NewServer(&core{engine: engine, st: st, log: log, version: o.version}, log)
+	srv := ipc.NewServer(&core{
+		engine:   engine,
+		st:       st,
+		projects: project.New(mgr.Get().Project.Markers),
+		log:      log,
+		version:  o.version,
+	}, log)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -185,13 +195,19 @@ func runServe(ctx context.Context, o serveOpts) error {
 // core implements ipc.Handler: the seam where transport meets providers and
 // storage.
 type core struct {
-	engine  *provider.Engine
-	st      *store.Store
-	log     *slog.Logger
-	version string
+	engine   *provider.Engine
+	st       *store.Store
+	projects *project.Resolver
+	log      *slog.Logger
+	version  string
 }
 
+// Suggest resolves the query's project before ranking. Clients send only a
+// cwd — "which project is that in" is a filesystem question, so the daemon
+// answers it (cached; see the project package) rather than making every
+// client implement the walk.
 func (c *core) Suggest(ctx context.Context, q provider.Query) []provider.Candidate {
+	q.ProjectRoot = c.projects.Root(q.CWD)
 	return c.engine.Suggest(ctx, q)
 }
 

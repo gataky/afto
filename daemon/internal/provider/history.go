@@ -58,7 +58,7 @@ func (h *History) Suggest(ctx context.Context, q Query) ([]Candidate, error) {
 		age := now.Sub(time.Unix(r.LastTS, 0)).Hours()
 		out = append(out, Candidate{
 			Text:   r.Cmd,
-			Score:  scoring.Frecency(r.Count, age, 0, 0),
+			Score:  scoring.Frecency(scoring.Term{Count: r.Count, AgeHours: age}, scoring.Term{}, scoring.Term{}),
 			Source: "history",
 		})
 	}

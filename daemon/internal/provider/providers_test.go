@@ -92,6 +92,60 @@ func TestFrecencyCwdAffinity(t *testing.T) {
 	}
 }
 
+func TestFrecencyProjectAffinity(t *testing.T) {
+	// "make test" is a habit elsewhere in this project (never in this exact
+	// directory); "make deploy" runs more often but outside it entirely.
+	// Being in the project must win.
+	f := NewFrecency(&fakeStats{prefix: []store.StatRow{
+		{Cmd: "make test", CWD: "", Count: 5, LastTS: ts(2)},
+		{Cmd: "make test", CWD: "/w/proj/api", Count: 5, LastTS: ts(2)},
+		{Cmd: "make deploy", CWD: "", Count: 9, LastTS: ts(2)},
+	}})
+	f.now = fixedNow
+
+	got, err := f.Suggest(context.Background(), Query{
+		Buffer: "make", CWD: "/w/proj/web", ProjectRoot: "/w/proj",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Text != "make test" {
+		t.Fatalf("project affinity did not win: %+v", got)
+	}
+
+	// Same data, no project context: the global habit wins instead, which
+	// is exactly the pre-Phase-3 behavior.
+	got, err = f.Suggest(context.Background(), Query{Buffer: "make", CWD: "/w/proj/web"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Text != "make deploy" {
+		t.Fatalf("without a project root the global habit should lead: %+v", got)
+	}
+}
+
+func TestFrecencyDirectoryOutranksProject(t *testing.T) {
+	// Equal counts, one earned here and one earned elsewhere in the
+	// project: standing in the directory breaks the tie.
+	f := NewFrecency(&fakeStats{prefix: []store.StatRow{
+		{Cmd: "terraform apply", CWD: "", Count: 4, LastTS: ts(1)},
+		{Cmd: "terraform apply", CWD: "/w/proj/infra", Count: 4, LastTS: ts(1)},
+		{Cmd: "terraform plan", CWD: "", Count: 4, LastTS: ts(1)},
+		{Cmd: "terraform plan", CWD: "/w/proj/other", Count: 4, LastTS: ts(1)},
+	}})
+	f.now = fixedNow
+
+	got, err := f.Suggest(context.Background(), Query{
+		Buffer: "terraform", CWD: "/w/proj/infra", ProjectRoot: "/w/proj",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Text != "terraform apply" {
+		t.Fatalf("directory term must dominate: %+v", got)
+	}
+}
+
 func TestFrecencyDropsBufferAndMultiline(t *testing.T) {
 	f := NewFrecency(&fakeStats{prefix: []store.StatRow{
 		{Cmd: "ls", CWD: "", Count: 5, LastTS: ts(1)},

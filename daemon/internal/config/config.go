@@ -38,6 +38,7 @@ type Config struct {
 	IdleShutdownMin int       `toml:"idle_shutdown_min"`
 	LogLevel        string    `toml:"log_level"`
 	Providers       Providers `toml:"providers"`
+	Project         Project   `toml:"project"`
 	Redact          Redact    `toml:"redact"`
 }
 
@@ -45,8 +46,19 @@ type Config struct {
 // start; unlike the other keys they do not hot-reload (the provider set is
 // wired once — restarting the daemon is `kill` + next keystroke respawn).
 type Providers struct {
-	History  bool `toml:"history"`
-	Frecency bool `toml:"frecency"`
+	History    bool `toml:"history"`
+	Frecency   bool `toml:"frecency"`
+	Transition bool `toml:"transition"`
+	AliasNote  bool `toml:"alias_note"`
+}
+
+// Project configures how a directory is mapped to its enclosing project,
+// which the frecency score uses to rank "what you run in this repo" above
+// "what you run everywhere". An empty Markers list means the built-in
+// defaults (project.DefaultMarkers) — to switch project ranking off, use
+// the marker list you actually want or disable the frecency provider.
+type Project struct {
+	Markers []string `toml:"markers"`
 }
 
 // Redact extends (never replaces) the built-in secret patterns in
@@ -61,7 +73,7 @@ func Default() Config {
 		LatencyBudgetMS: 40,
 		IdleShutdownMin: 30,
 		LogLevel:        "info",
-		Providers:       Providers{History: true, Frecency: true},
+		Providers:       Providers{History: true, Frecency: true, Transition: true, AliasNote: true},
 	}
 }
 
