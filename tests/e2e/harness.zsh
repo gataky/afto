@@ -14,8 +14,13 @@
 #   * ZLE specials ($BUFFER etc.) don't exist in fd handlers — the plugin
 #     handles that internally, but it means assertions must come from the
 #     rendered terminal bytes, not from poking shell state.
-#   * Strip ANSI before matching text; assert output markers with grep -x
-#     (echoes of typed text would false-positive a substring match).
+#   * Strip ANSI before matching text — and mind that with a multi-line
+#     POSTDISPLAY (Phase 2 rows) ZLE repositions the cursor with escape
+#     sequences instead of emitting "\n", so the FIRST line of a command's
+#     output can merge into redraw bytes in the stripped stream. Markers
+#     therefore (a) are written with a quote-split (print MAR''KER) so the
+#     marker string can never occur in echoed/displayed text — only in
+#     real output — and (b) are asserted end-anchored, not whole-line.
 
 emulate -L zsh
 zmodload zsh/zpty || { print "harness: zsh/zpty unavailable"; exit 2 }
@@ -47,9 +52,12 @@ path=($REPO/bin $path)
 # Seed suggestions via HISTFILE auto-import (runs on daemon start): this
 # exercises the import path AND avoids having to execute weird commands
 # just to get them into history.
+# Seed commands print their markers through a quote-split so the marker
+# appears in the transcript ONLY if the command actually executed — never
+# from the candidate being displayed as ghost text or a list row.
 export HISTFILE=$D/seedhist
 {
-  print ": $EPOCHSECONDS:0;true afto-e2e-accept-target && print ACCEPT-SHOWN"
+  print ": $EPOCHSECONDS:0;true afto-e2e-accept-target && print AC''CEPT-SHOWN"
   print ": $EPOCHSECONDS:0;ls .zshrc-fantastic-history-suggestion"
 } > $HISTFILE
 
@@ -62,7 +70,9 @@ drain()    { local c i; for i in {1..40}; do zpty -r -t z c 2>/dev/null && CAP+=
 typeslow() { local ch; for ch in ${(s::)1}; do zpty -wn z $ch; sleep 0.05; done }
 enter()    { zpty -wn z $'\r' }
 stripped() { print -r -- $CAP | perl -pe 's/\e\[[0-9;?]*[a-zA-Z]//g; s/\r//g' }
-count_line() { stripped | grep -cx -- $1 }
+# End-anchored on purpose: output can merge into a redraw line (see header),
+# but nothing except real output ever ENDS in a quote-split marker.
+count_marker() { stripped | grep -c -- "${1}\$" }
 # File + slurp mode: robust against arbitrary terminal bytes and against
 # the escape sequence spanning what perl -n would treat as separate lines.
 seg_has_ghost() {
@@ -73,9 +83,9 @@ seg_has_ghost() {
 zpty z zsh -f -i
 
 # --- S0: plugin loads; daemon comes up ---------------------------------------
-zpty -w z "source $PLUGIN && print LOADED-MARKER"
+zpty -w z "source $PLUGIN && print LOADED''-MARKER"
 sleep 2.5; drain
-if (( $(count_line LOADED-MARKER) == 1 )); then pass "plugin loads"; else fail "plugin loads"; fi
+if (( $(count_marker LOADED-MARKER) == 1 )); then pass "plugin loads"; else fail "plugin loads"; fi
 if $BIN ping --socket $AFTO_SOCKET >/dev/null 2>&1; then pass "daemon lazily spawned"; else fail "daemon lazily spawned"; fi
 
 # --- S1: ghost text renders from imported history ------------------------------
@@ -83,16 +93,18 @@ mark=$(( ${#CAP} + 1 ))
 typeslow "true afto-e2e-acc"
 sleep 0.5; drain
 if seg_has_ghost $mark; then pass "ghost text renders (dim bytes present)"; else fail "ghost text renders"; fi
+# Tier 2: the same candidate also renders as a ▸-marked list row.
+if stripped | grep -q -- "▸ true afto-e2e-acc"; then pass "passive list row renders"; else fail "passive list row renders"; fi
 
 # --- S2: ^] accept executes exactly what was displayed --------------------------
 zpty -wn z $'\x1d'   # accept: buffer becomes the full displayed suggestion
 sleep 0.3
-typeslow " && print ACCEPT-OK"; enter
+typeslow " && print ACC''EPT-OK"; enter
 sleep 1; drain
 # ACCEPT-SHOWN printing proves the *displayed* suggestion (not some other
 # text) is what landed in the buffer and ran.
-if (( $(count_line ACCEPT-SHOWN) == 1 )); then pass "accept executed the displayed suggestion"; else fail "accept executed the displayed suggestion"; fi
-if (( $(count_line ACCEPT-OK) == 1 )); then pass "post-accept editing works"; else fail "post-accept editing works"; fi
+if (( $(count_marker ACCEPT-SHOWN) == 1 )); then pass "accept executed the displayed suggestion"; else fail "accept executed the displayed suggestion"; fi
+if (( $(count_marker ACCEPT-OK) == 1 )); then pass "post-accept editing works"; else fail "post-accept editing works"; fi
 
 # --- S3: THE IRIS BUG — native TAB with ghost visible ----------------------------
 zpty -w z "cd $D/fix"
@@ -105,17 +117,22 @@ zpty -wn z $'\t'     # native expand-or-complete must win
 sleep 0.5
 enter
 sleep 1; drain
-# Completion must have used the FILESYSTEM (.zshrc-fake), not the ghost
-# (.zshrc-fantastic-history-suggestion), and executing it lists the file.
-if (( $(count_line .zshrc-fake) >= 1 )); then pass "TAB completed natively from filesystem"; else fail "TAB completed natively from filesystem"; fi
-if stripped | grep -q "fantastic-history-suggestion\$"; then fail "ghost leaked into completion"; else pass "ghost did not leak into completion"; fi
+# Completion must have used the FILESYSTEM: the buffer becomes .zshrc-fake
+# and executing it succeeds. Had TAB done nothing (ls .zshrc-f) or had the
+# ghost/row text leaked into the buffer (.zshrc-fantastic-…), the executed
+# ls would print "No such file" — which S5's noise gate also catches, but
+# assert it here where the failure would be introduced. (The Phase 1
+# line-end grep for the ghost text is invalid now: with AFTO_ROWS > 0 the
+# suggestion legitimately appears in the transcript as a list row.)
+if stripped | grep -q '\.zshrc-fake'; then pass "TAB completed natively from filesystem"; else fail "TAB completed natively from filesystem"; fi
+if stripped | grep -qi "no such file"; then fail "ghost leaked into completion"; else pass "ghost did not leak into completion"; fi
 
 # --- S4: daemon killed mid-session → typing unaffected, silence ------------------
 pid=$(lsof -t $D/afto.sock.lock 2>/dev/null)
 [[ -n $pid ]] && kill $pid && sleep 0.3
-typeslow "print STILL-ALIVE-OK"; enter
+typeslow "print STILL''-ALIVE-OK"; enter
 sleep 1; drain
-if (( $(count_line STILL-ALIVE-OK) == 1 )); then pass "shell fully functional after daemon kill"; else fail "shell fully functional after daemon kill"; fi
+if (( $(count_marker STILL-ALIVE-OK) == 1 )); then pass "shell fully functional after daemon kill"; else fail "shell fully functional after daemon kill"; fi
 
 # --- S5: no error noise anywhere in the session -----------------------------------
 if stripped | grep -qiE "error|failed|no such|command not found|broken pipe"; then

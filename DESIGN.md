@@ -83,7 +83,9 @@ $ git ch█eckout main              ← buffer + dim ghost
 ```
 
 While the list is visible, **no keys are claimed**: TAB completes natively, arrows do
-history, typing refines the list. Config: `menu.passive_rows = 0..10` (0 = ghost-only).
+history, typing refines the list. Config: `AFTO_ROWS=0..10` (client env var, default 4,
+0 = ghost-only — rendering is purely client-side, so the knob lives in the shell, not
+in the daemon's config.toml).
 Known tradeoffs vs IRIS: rows scroll the screen at the bottom edge (no floating
 overlay), and styling is color/bold rather than icon fonts. True floating panels
 (kitty/wezterm protocols) are a future plugin, not core.
