@@ -22,6 +22,9 @@ daemon and production zsh plugin) is fully specified but not implemented.
 - `plans/phase-1.md` — the complete Phase 1 implementation spec: wire protocol,
   SQLite schema, scoring formula, milestones, and acceptance gates. Follow it
   when building the daemon/plugin.
+- `docs/protocol.md` — narrative wire-protocol reference: who the clients are,
+  the keystroke round trip, why requests are JSON but ZLE responses are TSV,
+  one-in-flight flow control, and protocol evolution rules.
 - `poc/` — the validated Phase 0 proof of concept. **Do not modify**; it is the
   reference for the UI contract. Production shell code goes in `shell/zsh/`.
 - `references/IRIS/` — read-only checkout of IRIS for study (gitignored, 0BSD
@@ -50,15 +53,20 @@ Any change that touches shell integration must preserve these invariants
 
 - Go 1.26.5 via `.tool-versions`; direnv `layout go` (`GOPATH` under `.direnv/`).
 - Module path: `github.com/gataky/afto`.
-- Build/test targets (`make build|test|e2e|bench|vet` → `bin/aftod`) are defined
-  by `plans/phase-1.md §10 M1` and exist once Phase 1 lands.
-
-Working checks today:
 
 ```zsh
-zsh -n poc/afto.plugin.zsh          # syntax check
-zsh -f -i -c 'source poc/afto.plugin.zsh && bindkey "^I"'   # must print expand-or-complete
+make build   # → bin/aftod
+make test    # go unit + integration tests (all packages)
+make vet
+make e2e     # zpty acceptance harness (tests/e2e/harness.zsh) — needs build
+make bench   # keystroke→ghost latency gate (tests/e2e/latency.zsh)
 ```
+
+Debugging the shell side: set `AFTO_DEBUG=/tmp/afto.trace` before sourcing
+the plugin for a client-side event trace; `log_level = "debug"` in config
+for daemon-side request logs. `aftod serve --foreground` runs undetached
+with stderr logging. Phase 1 completion status and hard-won implementation
+notes (zpty testing rules, zle -F context limits): `plans/phase-1-report.md`.
 
 ## Testing approach
 
