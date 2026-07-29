@@ -635,6 +635,35 @@ _afto_menu_other() {
   return 0
 }
 
+# --- optional fzf picker (DESIGN.md §2.3; docs/fzf.md) ----------------------------
+# Defined but DELIBERATELY UNBOUND. afto never claims ^R, ^T or Alt+C —
+# coexistence with fzf is guaranteed precisely because we don't touch its
+# keys. A user who wants afto's frecency ranking behind ^R opts in:
+#
+#     bindkey '^R' afto-fzf
+#
+# This widget forks (fzf, aftod). That is fine and is not a contract
+# violation: it runs only when the user presses its key, never from a hook.
+# The keystroke path remains fork-free.
+_afto_fzf() {
+  emulate -L zsh
+  (( $+commands[fzf] )) || return 0
+  _afto_clear
+  local pick
+  # --prefix "$LBUFFER": what is left of the cursor filters the list, so the
+  # widget refines a partly-typed line instead of discarding it.
+  pick=$(command $AFTO_CMD list --prefix "$LBUFFER" 2>/dev/null |
+    fzf --height 40% --reverse --query "$LBUFFER" --no-sort) || {
+    zle redisplay
+    return 0
+  }
+  [[ -n $pick ]] || { zle redisplay; return 0 }
+  BUFFER=$pick
+  CURSOR=${#BUFFER}
+  zle redisplay
+  return 0
+}
+
 # --- user command ----------------------------------------------------------------
 
 afto() {
@@ -648,6 +677,8 @@ afto() {
       zle -A .forward-word forward-word 2>/dev/null
       bindkey -r "$AFTO_ACCEPT_KEY"
       bindkey -r "$AFTO_MENU_KEY"
+      # afto-fzf is never bound by us, but a user may have bound it; leave
+      # their binding alone rather than guessing which key it is on.
       bindkey -D afto-menu 2>/dev/null   # menu cannot be active here: running
       _afto_menu_active=0                # a command means the line was accepted
       _afto_clear 2>/dev/null
@@ -686,6 +717,7 @@ zle -N forward-char _afto_forward_char
 zle -N forward-word _afto_forward_word
 zle -N _afto_process
 zle -N afto-menu-enter _afto_menu_enter
+zle -N afto-fzf _afto_fzf        # defined, never bound: see _afto_fzf
 zle -N _afto_menu_up
 zle -N _afto_menu_down
 zle -N _afto_menu_accept
