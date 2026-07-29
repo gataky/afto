@@ -50,6 +50,15 @@ autoload -Uz add-zle-hook-widget add-zsh-hook || return 0
 # responses, displays). The only sanctioned diagnostic output — it goes to a
 # file, never the terminal, so the "failure is silence" contract holds.
 
+# Box UI theme — hex truecolor (ZSH 5.8+ / truecolor terminal). Override any
+# of these before sourcing the plugin to retheme without touching this file.
+: ${AFTO_BOX_BORDER:="fg=#6d6a7f"}                  # ╭─╮│╰╯ and dim rows
+: ${AFTO_BOX_ACCENT:="fg=#a277ff"}                  # scroll counter, key hints
+: ${AFTO_BOX_SEL_BG:="bg=#3d375e,fg=#edecee"}       # selected row background
+: ${AFTO_BOX_MARKER:="fg=#61ffca,bold,bg=#3d375e"}  # ▸ on selected row
+: ${AFTO_BOX_BADGE:="fg=#61ffca,bg=#1a2d36"}        # source badge, unselected
+: ${AFTO_BOX_BADGE_SEL:="fg=#110f18,bg=#61ffca,bold"} # source badge, selected
+
 _afto_debug() {
   [[ -n $AFTO_DEBUG ]] || return 0
   print -r -- "$EPOCHREALTIME $*" >>| $AFTO_DEBUG 2>/dev/null
@@ -235,32 +244,106 @@ _afto_render() {
     post=$_afto_ghost
   fi
 
-  local -i B=${#BUFFER} start
+  local -i B=${#BUFFER} p
   local -a hl
   [[ -n $post ]] && hl=("$B $(( B + ${#post} )) $AFTO_HIGHLIGHT")
+
   if (( rows > 0 )); then
+    # COLUMNS-1: a row of exactly $COLUMNS chars leaves the cursor in the
+    # terminal's pending-wrap state; the following \n then fires a spurious
+    # extra newline, producing blank lines between rows.
+    local -i boxW=$(( COLUMNS > 31 ? COLUMNS - 1 : 39 ))
+    local -i innerW=$(( boxW - 2 ))
+
+    # ── Top border: ╭── N/M ──────────────────────────────────────────────╮
+    local scrollInfo=" ${_afto_sel}/${#disp} "
+    local -i siLen=${#scrollInfo}
+    local -i lDash=$(( (innerW - siLen) / 2 ))
+    local -i rDash=$(( innerW - siLen - lDash ))
+    (( lDash < 1 )) && lDash=1
+    (( rDash < 1 )) && rDash=1
+    local topLine="╭${(r:$lDash::─:)}${scrollInfo}${(r:$rDash::─:)}╮"
+
+    p=$(( B + ${#post} ))
+    post+=$'\n'${topLine}
+    local -i tb=$(( p + 1 ))                                        # ╭ position
+    hl+=("$tb $(( tb + boxW )) $AFTO_BOX_BORDER")                  # whole line dim
+    hl+=("$(( tb + 1 + lDash )) $(( tb + 1 + lDash + siLen )) $AFTO_BOX_ACCENT")  # N/M
+
+    # ── Data rows: │ ▸ paddedCmd badgePadded│
+    # Row template: "│ ${marker} ${paddedCmd}${badgePadded}│"
+    # Char widths:   1  1  1  1   cmdW        badgeLen       1  = 5+cmdW+badgeLen = boxW
+    # → cmdW = innerW - 3 - badgeLen
+    # Positions (0-indexed from │): marker@2, paddedCmd@4..3+cmdW, badge@4+cmdW
     i=0
     for c in "${disp[@]}"; do
       (( i++ ))
       (( i > rows )) && break
-      start=$(( B + ${#post} + 1 ))     # +1: highlight starts after the \n
-      if (( i == _afto_sel )); then
-        post+=$'\n'"  ▸ $c"
-        hl+=("$start $(( B + ${#post} )) $AFTO_HIGHLIGHT_SELECTED")
-      else
-        post+=$'\n'"    $c"
-        hl+=("$start $(( B + ${#post} )) $AFTO_HIGHLIGHT_ROW")
+
+      local rawNote=${dnotes[i]}
+      local badgePadded=""
+      local -i badgeLen=0
+      if [[ -n $rawNote ]]; then
+        badgePadded=" ${rawNote} "
+        badgeLen=${#badgePadded}
       fi
-      # The note trails its row in the dim row style even when the row
-      # itself is selected: it is annotation, not part of the command, and
-      # styling it differently is what keeps that visually obvious.
-      if [[ -n ${dnotes[i]} ]]; then
-        start=$(( B + ${#post} ))
-        post+="  ${dnotes[i]}"
-        hl+=("$start $(( B + ${#post} )) $AFTO_HIGHLIGHT_ROW")
+      # Drop badge if it would leave fewer than 4 chars for the command.
+      (( innerW - 3 - badgeLen < 4 )) && { badgePadded=""; badgeLen=0; }
+
+      local -i cmdW=$(( innerW - 3 - badgeLen ))
+      local marker=" "
+      (( i == _afto_sel )) && marker="▸"
+
+      local cmdDisplay=$c
+      (( ${#cmdDisplay} > cmdW )) && cmdDisplay="${cmdDisplay[1,$(( cmdW - 1 ))]}…"
+      local paddedCmd=${(r:$cmdW:: :)cmdDisplay}
+
+      local row="│ ${marker} ${paddedCmd}${badgePadded}│"
+      p=$(( B + ${#post} ))
+      post+=$'\n'${row}
+      local -i rs=$(( p + 1 ))           # points to │
+      local -i re=$(( rs + ${#row} ))    # exclusive end
+
+      if (( i == _afto_sel )); then
+        hl+=("$rs $re $AFTO_BOX_SEL_BG")
+        hl+=("$(( rs + 2 )) $(( rs + 3 )) $AFTO_BOX_MARKER")        # ▸
+        if [[ -n $badgePadded ]]; then
+          local -i bs=$(( rs + 4 + cmdW ))
+          hl+=("$bs $(( bs + badgeLen )) $AFTO_BOX_BADGE_SEL")
+        fi
+      else
+        hl+=("$rs $re $AFTO_BOX_BORDER")
+        hl+=("$rs $(( rs + 1 )) $AFTO_BOX_ACCENT")                  # left │
+        hl+=("$(( re - 1 )) $re $AFTO_BOX_ACCENT")                  # right │
+        if [[ -n $badgePadded ]]; then
+          local -i bs=$(( rs + 4 + cmdW ))
+          hl+=("$bs $(( bs + badgeLen )) $AFTO_BOX_BADGE")
+        fi
       fi
     done
+
+    # ── Bottom border: ╰──────────── ↑↓ Navigate  •  → Accept ──────────────╯
+    local fKey1=" ↑↓ Navigate "
+    local fSep=" • "
+    local fKey2=" → Accept "
+    local footer="${fKey1}${fSep}${fKey2}"
+    local -i fLen=${#footer}
+    local -i lFill=$(( (innerW - fLen) / 2 ))
+    local -i rFill=$(( innerW - fLen - lFill ))
+    (( lFill < 1 )) && lFill=1
+    (( rFill < 1 )) && rFill=1
+    local botLine="╰${(r:$lFill::─:)}${footer}${(r:$rFill::─:)}╯"
+
+    p=$(( B + ${#post} ))
+    post+=$'\n'${botLine}
+    local -i bb=$(( p + 1 ))
+    hl+=("$bb $(( bb + boxW )) $AFTO_BOX_BORDER")
+    local -i fStart=$(( bb + 1 + lFill ))
+    hl+=("$fStart $(( fStart + ${#fKey1} )) $AFTO_BOX_ACCENT")
+    local -i fStart2=$(( fStart + ${#fKey1} + ${#fSep} ))
+    hl+=("$fStart2 $(( fStart2 + ${#fKey2} )) $AFTO_BOX_ACCENT")
   fi
+
   POSTDISPLAY=$post
   _afto_hl=("${hl[@]}")
   region_highlight+=("${hl[@]}")
