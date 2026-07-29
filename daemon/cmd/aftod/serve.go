@@ -14,6 +14,7 @@ import (
 
 	"github.com/gataky/afto/daemon/internal/config"
 	"github.com/gataky/afto/daemon/internal/ipc"
+	"github.com/gataky/afto/daemon/internal/plugin"
 	"github.com/gataky/afto/daemon/internal/project"
 	"github.com/gataky/afto/daemon/internal/provider"
 	"github.com/gataky/afto/daemon/internal/store"
@@ -158,6 +159,34 @@ func runServe(ctx context.Context, o serveOpts) error {
 	if pc.Transition {
 		providers = append(providers, provider.NewTransition(st))
 	}
+	// External plugins are providers like any other — the race, the budget
+	// and the merge already know how to contain a slow source, so a plugin
+	// needs no special case here. Wired at start, like the built-in toggles.
+	var hosts []*plugin.Host
+	for _, pcfg := range mgr.Get().Plugins {
+		if !pcfg.On() || pcfg.Name == "" || pcfg.Command == "" {
+			continue
+		}
+		timeout := time.Duration(pcfg.TimeoutMS) * time.Millisecond
+		if timeout <= 0 {
+			timeout = time.Duration(mgr.Get().LatencyBudgetMS) * time.Millisecond
+		}
+		h := plugin.New(plugin.Config{
+			Name: pcfg.Name, Command: pcfg.Command, Args: pcfg.Args, Timeout: timeout,
+		}, log)
+		hosts = append(hosts, h)
+		providers = append(providers, h)
+		// Warm up off the serving path: spawning here would delay the socket
+		// coming up, and the first suggestion should not have to race a cold
+		// exec against the latency budget.
+		go h.Start()
+		log.Info("plugin configured", "name", pcfg.Name, "command", pcfg.Command, "timeout", timeout)
+	}
+	defer func() {
+		for _, h := range hosts {
+			h.Close()
+		}
+	}()
 	budget := func() time.Duration {
 		return time.Duration(mgr.Get().LatencyBudgetMS) * time.Millisecond
 	}

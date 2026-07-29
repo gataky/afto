@@ -34,6 +34,38 @@ func TestLoadOverridesAndDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadPlugins(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	os.WriteFile(p, []byte(`
+[[plugin]]
+name = "make-targets"
+command = "/usr/local/bin/afto-make-targets"
+timeout_ms = 25
+
+[[plugin]]
+name = "noisy"
+command = "/bin/echo"
+args = ["hi"]
+enabled = false
+`), 0o600)
+
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Plugins) != 2 {
+		t.Fatalf("got %+v", c.Plugins)
+	}
+	first := c.Plugins[0]
+	if first.Name != "make-targets" || first.TimeoutMS != 25 || !first.On() {
+		t.Fatalf("first plugin: %+v", first)
+	}
+	// Omitted `enabled` means on; explicit false means off.
+	if second := c.Plugins[1]; second.On() || len(second.Args) != 1 || second.Args[0] != "hi" {
+		t.Fatalf("second plugin: %+v", second)
+	}
+}
+
 func TestLoadInvalidFileReturnsDefaultsAndError(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.toml")
 	os.WriteFile(p, []byte("latency_budget_ms = }{"), 0o600)

@@ -40,7 +40,17 @@ main() {
 
   export AFTO_SOCKET=$D/afto.sock AFTO_DATA_DIR=$D/data AFTO_CONFIG=$D/cfg.toml
   export XDG_STATE_HOME=$D/state
-  print 'log_level = "debug"' > $AFTO_CONFIG   # for daemon-side handle times
+  # A plugin that NEVER answers is configured for the whole run. This is the
+  # strongest form of the phase-4 promise: the gate below is measured with a
+  # broken external process sitting in the provider race on every keystroke.
+  print '#!/bin/sh\nwhile IFS= read -r l; do sleep 30; done' > $D/hang.sh
+  chmod +x $D/hang.sh
+  {
+    print 'log_level = "debug"'   # for daemon-side handle times
+    print '[[plugin]]'
+    print 'name = "hangs"'
+    print "command = \"$D/hang.sh\""
+  } > $AFTO_CONFIG
   path=($REPO/bin $path)
 
   # One seeded command; every sample types "t" and gets this as the ghost.

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -18,6 +19,13 @@ import (
 // socket path plus a stopper. This is the M5 integration test fixture:
 // everything between the socket and SQLite is the production code path.
 func startDaemon(t *testing.T, histfile string) (string, context.CancelFunc) {
+	t.Helper()
+	return startDaemonCfg(t, histfile, "")
+}
+
+// startDaemonCfg additionally writes a config.toml before the daemon starts,
+// for tests that need configured plugins.
+func startDaemonCfg(t *testing.T, histfile, configBody string) (string, context.CancelFunc) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "afto-it") // NB: t.TempDir can exceed the 104-byte sun_path limit
 	if err != nil {
@@ -36,6 +44,11 @@ func startDaemon(t *testing.T, histfile string) (string, context.CancelFunc) {
 		config:  filepath.Join(dir, "config.toml"),
 		logFile: filepath.Join(dir, "aftod.log"),
 		version: "it-test",
+	}
+	if configBody != "" {
+		if err := os.WriteFile(o.config, []byte(configBody), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -120,6 +133,121 @@ func TestDaemonAutoImportsHistfileOnce(t *testing.T) {
 	request(t, conn, ipc.Request{V: 1, Type: "suggest", ID: 1, Fmt: "tsv", Buffer: "make dep"})
 	if got := string(readL(t, r)); got != "1\tmake deploy-prod" {
 		t.Fatalf("imported history not suggested: %q", got)
+	}
+}
+
+// pluginScript writes an executable sh plugin and returns its path.
+func pluginScript(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "plug.sh")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestDaemonServesPluginCandidates(t *testing.T) {
+	plug := pluginScript(t, `
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  printf '{"v":1,"id":%s,"candidates":[{"text":"deploy from-plugin","score":99}]}\n' "$id"
+done
+`)
+	// A generous budget on purpose: the engine's deadline covers the whole
+	// race, and a cold `sh` spawn plus a `sed` fork does not reliably fit in
+	// the 40ms production default. Containment under a tight budget is what
+	// TestDaemonSurvivesABrokenPlugin asserts; this test is about the
+	// candidate reaching the client at all.
+	socket, _ := startDaemonCfg(t, "", `
+latency_budget_ms = 3000
+[[plugin]]
+name = "demo"
+command = "`+plug+`"
+timeout_ms = 2000
+`)
+	conn, r := connect(t, socket)
+
+	// JSON format so the response carries provenance, not just text.
+	request(t, conn, ipc.Request{V: 1, Type: "suggest", ID: 1, Buffer: "deploy", CWD: "/x"})
+	var resp ipc.SuggestResponse
+	if err := json.Unmarshal(readL(t, r), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Candidates) != 1 {
+		t.Fatalf("plugin candidate missing: %+v", resp.Candidates)
+	}
+	if resp.Candidates[0].Text != "deploy from-plugin" {
+		t.Fatalf("unexpected text: %+v", resp.Candidates[0])
+	}
+	if resp.Candidates[0].Source != "demo" {
+		t.Fatalf("source = %q, want the configured plugin name", resp.Candidates[0].Source)
+	}
+}
+
+func TestDaemonSurvivesABrokenPlugin(t *testing.T) {
+	// One plugin hangs forever, one exits instantly. Neither may stop the
+	// daemon from answering from its own history — this is the phase's core
+	// promise, asserted end to end rather than only in the host's unit tests.
+	hang := pluginScript(t, `while IFS= read -r line; do sleep 30; done`)
+	dead := pluginScript(t, `exit 1`)
+	socket, _ := startDaemonCfg(t, "", `
+latency_budget_ms = 60
+[[plugin]]
+name = "hangs"
+command = "`+hang+`"
+[[plugin]]
+name = "dies"
+command = "`+dead+`"
+`)
+	conn, r := connect(t, socket)
+
+	request(t, conn, ipc.Request{V: 1, Type: "record",
+		Cmd: "make release", CWD: "/repo", Session: "s1", TS: time.Now().Unix()})
+
+	for i := 0; i < 3; i++ {
+		start := time.Now()
+		request(t, conn, ipc.Request{V: 1, Type: "suggest", ID: int64(i + 1), Fmt: "tsv",
+			Buffer: "make rel", CWD: "/repo", Session: "s1"})
+		got := string(readL(t, r))
+		elapsed := time.Since(start)
+
+		if want := fmt.Sprintf("%d\tmake release", i+1); got != want {
+			t.Fatalf("request %d: got %q, want %q", i+1, got, want)
+		}
+		// The hanging plugin must cost at most the budget, never its own
+		// 30-second sleep.
+		if elapsed > 2*time.Second {
+			t.Fatalf("request %d took %v — a broken plugin delayed the answer", i+1, elapsed)
+		}
+	}
+}
+
+func TestDaemonSkipsDisabledAndIncompletePlugins(t *testing.T) {
+	plug := pluginScript(t, `
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  printf '{"v":1,"id":%s,"candidates":[{"text":"should not appear"}]}\n' "$id"
+done
+`)
+	socket, _ := startDaemonCfg(t, "", `
+[[plugin]]
+name = "off"
+command = "`+plug+`"
+enabled = false
+[[plugin]]
+name = "nameless-command"
+[[plugin]]
+command = "`+plug+`"
+`)
+	conn, r := connect(t, socket)
+
+	request(t, conn, ipc.Request{V: 1, Type: "suggest", ID: 1, Buffer: "should", CWD: "/x"})
+	var resp ipc.SuggestResponse
+	if err := json.Unmarshal(readL(t, r), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Candidates) != 0 {
+		t.Fatalf("disabled/incomplete plugins produced candidates: %+v", resp.Candidates)
 	}
 }
 

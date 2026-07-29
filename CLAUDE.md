@@ -10,12 +10,13 @@ a Go daemon (`aftod`) providing history/frecency-ranked candidates over a unix
 socket. It is a non-hijacking rethink of IRIS (a PTY-interposer tool that steals
 TAB and other keys — the failure mode this project exists to avoid).
 
-**Current stage:** Phases 0–3 complete. The `aftod` daemon with
+**Current stage:** Phases 0–4 complete. The `aftod` daemon with
 history/frecency/transition providers plus the async zsh plugin (Phase 1), the
-native dropdown — passive tier-2 rows and `^O` tier-3 menu mode (Phase 2) — and
+native dropdown — passive tier-2 rows and `^O` tier-3 menu mode (Phase 2) —
 context intelligence — project-affinity ranking, next-command prediction, alias
-notes (Phase 3) — are implemented and gated. Next: Phase 4, the subprocess
-plugin host and the optional fzf widget.
+notes (Phase 3) — and the subprocess plugin host plus opt-in fzf integration
+(Phase 4) are implemented and gated. Next: Phase 5, breadth (bash/fish clients,
+vi-mode polish, opt-in `ai` provider).
 
 ## Where truth lives
 
@@ -32,6 +33,9 @@ plugin host and the optional fzf widget.
 - `docs/protocol.md` — narrative wire-protocol reference: who the clients are,
   the keystroke round trip, why requests are JSON but ZLE responses are TSV,
   one-in-flight flow control, and protocol evolution rules.
+- `docs/plugins.md` — the plugin author's reference (stdio protocol, config,
+  and the three-layer failure containment); `docs/fzf.md` — coexistence and the
+  opt-in picker widget. Both are user-facing: keep them true.
 - `poc/` — the validated Phase 0 proof of concept. **Do not modify**; it is the
   reference for the UI contract. Production shell code goes in `shell/zsh/`.
 - `references/IRIS/` — read-only checkout of IRIS for study (gitignored, 0BSD
@@ -66,7 +70,7 @@ Any change that touches shell integration must preserve these invariants
 - Module path: `github.com/gataky/afto`.
 
 ```zsh
-make build   # → bin/aftod
+make build   # → bin/aftod, bin/afto-make-targets (the sample plugin)
 make test    # go unit + integration tests (all packages)
 make vet
 make e2e     # zpty acceptance harness (tests/e2e/harness.zsh) — needs build

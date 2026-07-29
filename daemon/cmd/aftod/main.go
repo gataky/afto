@@ -7,9 +7,9 @@
 //     socket. It is started lazily by the zsh plugin on first use (there is
 //     no launchd/systemd unit) and exits on its own after an idle period.
 //
-//   - "import", "query" and "ping" act as clients of a running daemon (or,
-//     for import, operate on the store directly) for bootstrap, testing and
-//     diagnostics.
+//   - "import", "query", "list" and "ping" act as clients of a running
+//     daemon (or, for import and list, operate on the store directly) for
+//     bootstrap, pickers, testing and diagnostics.
 //
 // The interactive consumer is shell/zsh/afto.plugin.zsh, which talks to the
 // daemon from inside zsh. Architecture: DESIGN.md; Phase 1 scope and
@@ -31,6 +31,8 @@ func run(cmd string, args []string) error {
 		return cmdImport(args)
 	case "query":
 		return cmdQuery(args)
+	case "list":
+		return cmdList(args)
 	case "ping":
 		return cmdPing(args)
 	}
@@ -44,6 +46,7 @@ commands:
   serve     run the suggestion daemon (--daemonize to detach)
   import    import a zsh HISTFILE into the store
   query     send a suggest request to a running daemon
+  list      print frecency-ranked history, one per line (for fzf and friends)
   ping      check daemon liveness
   version   print version
 `)
@@ -58,7 +61,7 @@ func main() {
 	switch os.Args[1] {
 	case "version":
 		fmt.Println(version)
-	case "serve", "import", "query", "ping":
+	case "serve", "import", "query", "list", "ping":
 		err = run(os.Args[1], os.Args[2:])
 	default:
 		usage()
