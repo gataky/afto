@@ -4,9 +4,8 @@
 // Two tables carry the data (plans/phase-1.md §6):
 //
 //   - events: an append-only ledger of every executed command with its cwd,
-//     session, exit code and timestamp. Nothing reads it on the suggestion
-//     hot path today; it exists so Phase 3 (command-transition prediction)
-//     can be built from data collected since day one.
+//     session, exit code and timestamp. It is what let Phase 3's transition
+//     table be backfilled from data collected since day one.
 //
 //   - stats: the aggregate the providers actually query — one row per
 //     (cmd, cwd) pair plus a "rollup" row per cmd with cwd=” that
@@ -14,6 +13,10 @@
 //     this command run anywhere" is a primary-key lookup instead of a SUM,
 //     at the cost of one extra upsert per ingest. Storage is command lines,
 //     so the dataset is small (tens of MB for years of history).
+//
+//   - transitions (schema v2): how often command B followed command A in the
+//     same shell session, feeding the next-command prediction shown on an
+//     empty prompt. Maintained on ingest and backfilled from events.
 //
 // Privacy invariant: redaction happens HERE, before persistence, not at
 // display time. A command matching a secret pattern is skipped entirely —
@@ -94,19 +97,132 @@ CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT
 );
+CREATE TABLE IF NOT EXISTS transitions (
+  prev    TEXT NOT NULL,
+  next    TEXT NOT NULL,
+  count   INTEGER NOT NULL,
+  last_ts INTEGER NOT NULL,
+  PRIMARY KEY (prev, next)
+);
+CREATE INDEX IF NOT EXISTS events_session ON events(session, id);
 `
 
+// schemaVersion is the version this code writes. Bump it and add an upgrade
+// step below when the shape changes.
+const schemaVersion = 2
+
+// migrate creates missing objects and upgrades an older database in place.
+// Databases are long-lived (they hold years of history), so an upgrade must
+// never require the user to delete anything: v1 stores get the v2 tables
+// created empty and then backfilled from the events ledger they already have.
 func migrate(db *sql.DB) error {
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
+
+	var have string
+	err := db.QueryRow(`SELECT value FROM meta WHERE key = 'schema_version'`).Scan(&have)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("store: migrate: %w", err)
+	}
+	// No version row at all means a database this code just created: the
+	// schema above is already current and there is nothing to migrate.
+	if errors.Is(err, sql.ErrNoRows) {
+		return setSchemaVersion(db, schemaVersion)
+	}
+	if have == "1" {
+		if err := backfillTransitions(db); err != nil {
+			return err
+		}
+	}
+	return setSchemaVersion(db, schemaVersion)
+}
+
+func setSchemaVersion(db *sql.DB, v int) error {
 	if _, err := db.Exec(
-		`INSERT INTO meta(key,value) VALUES('schema_version','1')
-		 ON CONFLICT(key) DO NOTHING`); err != nil {
+		`INSERT INTO meta(key,value) VALUES('schema_version',?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, v); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
 	return nil
 }
+
+// backfillTransitions reconstructs the transition table from the events
+// ledger: within each session, every command pairs with the one before it.
+//
+// Imported history is deliberately excluded (session 'import'). A HISTFILE
+// interleaves every terminal that was open, so consecutive lines in it are
+// not causally related — pairing them would teach the predictor noise. The
+// practical consequence, worth knowing: prediction becomes useful after a
+// day of real use, not at install time.
+func backfillTransitions(db *sql.DB) error {
+	rows, err := db.Query(
+		`SELECT session, cmd, ts FROM events
+		 WHERE session <> '' AND session <> 'import'
+		 ORDER BY session, id`)
+	if err != nil {
+		return fmt.Errorf("store: backfill: %w", err)
+	}
+	defer rows.Close()
+
+	type pair struct{ prev, next string }
+	agg := map[pair]*struct {
+		count  int64
+		lastTS int64
+	}{}
+	var curSession, prevCmd string
+	for rows.Next() {
+		var session, cmd string
+		var ts int64
+		if err := rows.Scan(&session, &cmd, &ts); err != nil {
+			return fmt.Errorf("store: backfill: %w", err)
+		}
+		if session != curSession { // session boundary: no pair spans shells
+			curSession, prevCmd = session, cmd
+			continue
+		}
+		if prevCmd != "" {
+			k := pair{prevCmd, cmd}
+			a := agg[k]
+			if a == nil {
+				a = &struct {
+					count  int64
+					lastTS int64
+				}{}
+				agg[k] = a
+			}
+			a.count++
+			if ts > a.lastTS {
+				a.lastTS = ts
+			}
+		}
+		prevCmd = cmd
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("store: backfill: %w", err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: backfill: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for k, a := range agg {
+		if err := upsertTransition(context.Background(), tx, k.prev, k.next, a.lastTS, a.count); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: backfill: %w", err)
+	}
+	return nil
+}
+
+// importSession marks events that came from a HISTFILE import rather than
+// from a live shell. Transition learning excludes them: a history file
+// interleaves every terminal that was open, so "the next line" is not "what
+// the user did next" (see backfillTransitions).
+const importSession = "import"
 
 // Event is one executed command as reported by a shell (or the importer).
 type Event struct {
@@ -130,10 +246,24 @@ func (s *Store) Ingest(ctx context.Context, e Event) (bool, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// The session's previous command, read BEFORE this one is appended, is
+	// the "prev" of a transition pair. Redacted commands never reach here,
+	// so a secret-shaped command doesn't just stay unstored — it also can't
+	// appear on either side of a pair; the chain simply closes over it.
+	prev, err := lastCommandTx(ctx, tx, e.Session)
+	if err != nil {
+		return false, err
+	}
+
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO events(cmd,cwd,session,exit_code,ts) VALUES(?,?,?,?,?)`,
 		e.Cmd, e.CWD, e.Session, e.Exit, e.TS); err != nil {
 		return false, fmt.Errorf("store: ingest: %w", err)
+	}
+	if prev != "" {
+		if err := upsertTransition(ctx, tx, prev, e.Cmd, e.TS, 1); err != nil {
+			return false, err
+		}
 	}
 	// Two distinct stats rows per execution: the (cmd,'') rollup feeds the
 	// frecency score's global term ("how often anywhere"); the (cmd,cwd) row
@@ -152,6 +282,89 @@ func (s *Store) Ingest(ctx context.Context, e Event) (bool, error) {
 		return false, fmt.Errorf("store: ingest: %w", err)
 	}
 	return true, nil
+}
+
+func upsertTransition(ctx context.Context, tx *sql.Tx, prev, next string, ts int64, n int64) error {
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO transitions(prev,next,count,last_ts) VALUES(?,?,?,?)
+		 ON CONFLICT(prev,next) DO UPDATE SET
+		   count = count + excluded.count,
+		   last_ts = MAX(last_ts, excluded.last_ts)`,
+		prev, next, n, ts)
+	if err != nil {
+		return fmt.Errorf("store: upsert transition: %w", err)
+	}
+	return nil
+}
+
+// lastCommandTx returns the most recent command recorded for a session, or
+// "" when the session is unknown, empty, or the importer's. The
+// events(session, id) index makes this a one-row index seek, which is why
+// it is affordable inside every ingest.
+func lastCommandTx(ctx context.Context, tx *sql.Tx, session string) (string, error) {
+	if session == "" || session == importSession {
+		return "", nil
+	}
+	var cmd string
+	err := tx.QueryRowContext(ctx,
+		`SELECT cmd FROM events WHERE session = ? ORDER BY id DESC LIMIT 1`, session).Scan(&cmd)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: last command: %w", err)
+	}
+	return cmd, nil
+}
+
+// LastCommand reports the session's most recent command. The transition
+// provider prefers the Recent context the shell sends, and falls back to
+// this for clients that send none (aftod query, tests).
+func (s *Store) LastCommand(ctx context.Context, session string) (string, error) {
+	if session == "" || session == importSession {
+		return "", nil
+	}
+	var cmd string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT cmd FROM events WHERE session = ? ORDER BY id DESC LIMIT 1`, session).Scan(&cmd)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: last command: %w", err)
+	}
+	return cmd, nil
+}
+
+// TransitionRow is one "what followed prev" aggregate.
+type TransitionRow struct {
+	Next   string
+	Count  int64
+	LastTS int64
+}
+
+// TopNext returns the commands most often run after prev, most frequent
+// first. A primary-key range seek on (prev, next).
+func (s *Store) TopNext(ctx context.Context, prev string, limit int) ([]TransitionRow, error) {
+	if prev == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT next, count, last_ts FROM transitions WHERE prev = ?
+		 ORDER BY count DESC, last_ts DESC LIMIT ?`, prev, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: transitions: %w", err)
+	}
+	defer rows.Close()
+	var out []TransitionRow
+	for rows.Next() {
+		var r TransitionRow
+		if err := rows.Scan(&r.Next, &r.Count, &r.LastTS); err != nil {
+			return nil, fmt.Errorf("store: scan: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func upsertStat(ctx context.Context, tx *sql.Tx, cmd, cwd string, ts int64, n int64) error {
@@ -176,15 +389,28 @@ type StatRow struct {
 }
 
 // PrefixStats returns stats rows whose cmd starts with prefix, restricted to
-// the rollup rows plus rows for the given cwd (both are needed to compute
-// the frecency score's global and cwd-affinity terms in one pass).
+// the rows the frecency score needs: the cwd=” rollup (global term), the
+// exact cwd (directory-affinity term), and — when root is non-empty —
+// everything inside that project root (project-affinity term). One scan
+// serves all three terms; the provider folds the row kinds.
+//
+// The project predicate is written against path boundaries, not a plain
+// string range: a naive `cwd >= root AND cwd < upperBound(root)` would sweep
+// in sibling directories that merely share a name prefix (/x/proj-old for
+// root /x/proj). Matching `cwd = root OR cwd BETWEEN root+"/" AND …` is
+// exact because a child path always continues with the separator.
 //
 // The lookup is a B-tree range scan on the (cmd, cwd) primary key —
 // deliberately not LIKE, which would not use the index reliably. limit
 // bounds the scan for very short prefixes.
-func (s *Store) PrefixStats(ctx context.Context, prefix, cwd string, limit int) ([]StatRow, error) {
-	q := `SELECT cmd, cwd, count, last_ts FROM stats WHERE cwd IN ('', ?)`
+func (s *Store) PrefixStats(ctx context.Context, prefix, cwd, root string, limit int) ([]StatRow, error) {
+	q := `SELECT cmd, cwd, count, last_ts FROM stats WHERE (cwd = '' OR cwd = ?`
 	args := []any{cwd}
+	if root != "" {
+		q += ` OR cwd = ? OR (cwd >= ? AND cwd < ?)`
+		args = append(args, root, root+"/", prefixUpperBound(root+"/"))
+	}
+	q += `)`
 	if prefix != "" {
 		q += ` AND cmd >= ?`
 		args = append(args, prefix)

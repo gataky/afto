@@ -18,8 +18,10 @@ import (
 )
 
 type fakeHandler struct {
-	recorded atomic.Int64
-	lastCmd  atomic.Value
+	recorded    atomic.Int64
+	lastCmd     atomic.Value
+	aliasSets   atomic.Int64
+	lastAliases atomic.Value
 }
 
 func (f *fakeHandler) Suggest(_ context.Context, q provider.Query) []provider.Candidate {
@@ -27,7 +29,7 @@ func (f *fakeHandler) Suggest(_ context.Context, q provider.Query) []provider.Ca
 		return nil
 	}
 	return []provider.Candidate{
-		{Text: q.Buffer + " --verbose", Score: 2, Source: "fake"},
+		{Text: q.Buffer + " --verbose", Score: 2, Source: "fake", Note: q.Buffer + " = note"},
 		{Text: q.Buffer + " --help", Score: 1, Source: "fake"},
 	}
 }
@@ -35,6 +37,11 @@ func (f *fakeHandler) Suggest(_ context.Context, q provider.Query) []provider.Ca
 func (f *fakeHandler) Record(r Request) {
 	f.recorded.Add(1)
 	f.lastCmd.Store(r.Cmd)
+}
+
+func (f *fakeHandler) SetAliases(r Request) {
+	f.aliasSets.Add(1)
+	f.lastAliases.Store(r.Map)
 }
 
 func (f *fakeHandler) Version() string { return "test-1" }
@@ -119,6 +126,46 @@ func TestSuggestTSVLimit(t *testing.T) {
 	send(t, conn, `{"v":1,"type":"suggest","id":13,"fmt":"tsv","buffer":"none","limit":4}`)
 	if got, want := readLine(t, r), "13\t"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestSuggestTSVNotes(t *testing.T) {
+	conn, _ := startServer(t)
+	r := bufio.NewReader(conn)
+
+	// A client that doesn't ask gets exactly the Phase 2 bytes, even
+	// though the candidate carries a note — the whole point of the gate.
+	send(t, conn, `{"v":1,"type":"suggest","id":20,"fmt":"tsv","buffer":"git","limit":2}`)
+	if got, want := readLine(t, r), "20\tgit --verbose\tgit --help"; got != want {
+		t.Fatalf("unrequested note leaked: got %q, want %q", got, want)
+	}
+
+	// Asking puts the note behind the unit separator, on that candidate
+	// only; the note-less candidate is unchanged.
+	send(t, conn, `{"v":1,"type":"suggest","id":21,"fmt":"tsv","buffer":"git","limit":2,"notes":true}`)
+	if got, want := readLine(t, r), "21\tgit --verbose\x1fgit = note\tgit --help"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestAliasesMessage(t *testing.T) {
+	conn, h := startServer(t)
+	r := bufio.NewReader(conn)
+
+	send(t, conn, `{"v":1,"type":"aliases","session":"s1","map":{"gco":"git checkout"}}`)
+	// Fire-and-forget like record: prove it landed by round-tripping a
+	// ping behind it rather than expecting a reply.
+	send(t, conn, `{"v":1,"type":"ping"}`)
+	var pong PingResponse
+	if err := json.Unmarshal([]byte(readLine(t, r)), &pong); err != nil {
+		t.Fatal(err)
+	}
+	if h.aliasSets.Load() != 1 {
+		t.Fatalf("aliases not handled: n=%d", h.aliasSets.Load())
+	}
+	m, _ := h.lastAliases.Load().(map[string]string)
+	if m["gco"] != "git checkout" {
+		t.Fatalf("unexpected alias map: %+v", m)
 	}
 }
 

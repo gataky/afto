@@ -33,15 +33,21 @@ func (f *Frecency) Suggest(ctx context.Context, q Query) ([]Candidate, error) {
 	if q.Buffer == "" {
 		return nil, nil
 	}
-	rows, err := f.stats.PrefixStats(ctx, q.Buffer, q.CWD, scanLimit)
+	rows, err := f.stats.PrefixStats(ctx, q.Buffer, q.CWD, q.ProjectRoot, scanLimit)
 	if err != nil {
 		return nil, err
 	}
 
-	// Fold the two row kinds per command: the cwd='' rollup carries the
-	// global term, the cwd-specific row the affinity term.
+	// Fold the three row kinds per command: the cwd='' rollup carries the
+	// global term, the exact-cwd row the directory term, and every row
+	// inside the project sums into the project term. The exact cwd counts
+	// toward BOTH affinity terms on purpose — running a command here is
+	// also running it in the project, and the weights are chosen so that
+	// earning both is the correct outcome for a directory-local habit.
 	type terms struct {
-		all, cwd store.StatRow
+		all, cwd   store.StatRow
+		projCount  int64
+		projLastTS int64
 	}
 	byCmd := make(map[string]*terms)
 	for _, r := range rows {
@@ -53,10 +59,21 @@ func (f *Frecency) Suggest(ctx context.Context, q Query) ([]Candidate, error) {
 			tr = &terms{}
 			byCmd[r.Cmd] = tr
 		}
-		if r.CWD == "" {
+		switch {
+		case r.CWD == "":
 			tr.all = r
-		} else {
+			continue
+		case r.CWD == q.CWD:
 			tr.cwd = r
+		}
+		// Every non-rollup row the query returned is inside the project
+		// scope by construction (the store restricts the scan to it), so
+		// no path comparison is needed here.
+		if q.ProjectRoot != "" {
+			tr.projCount += r.Count
+			if r.LastTS > tr.projLastTS {
+				tr.projLastTS = r.LastTS
+			}
 		}
 	}
 
@@ -65,8 +82,12 @@ func (f *Frecency) Suggest(ctx context.Context, q Query) ([]Candidate, error) {
 	out := make([]Candidate, 0, len(byCmd))
 	for cmd, tr := range byCmd {
 		out = append(out, Candidate{
-			Text:   cmd,
-			Score:  scoring.Frecency(tr.all.Count, age(tr.all.LastTS), tr.cwd.Count, age(tr.cwd.LastTS)),
+			Text: cmd,
+			Score: scoring.Frecency(
+				scoring.Term{Count: tr.all.Count, AgeHours: age(tr.all.LastTS)},
+				scoring.Term{Count: tr.cwd.Count, AgeHours: age(tr.cwd.LastTS)},
+				scoring.Term{Count: tr.projCount, AgeHours: age(tr.projLastTS)},
+			),
 			Source: "frecency",
 		})
 	}

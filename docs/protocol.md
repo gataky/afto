@@ -73,10 +73,25 @@ an unescape per field. Clients that can afford real parsing (tests,
 renders from the first candidate; the passive list rows (Phase 2) render
 from the rest. A request without `limit` keeps each format's historical
 default — top-1 for TSV (so a Phase 1 client is served unchanged),
-everything for JSON. Escaping contract: literal `\t`, `\n`, `\` in the text
-become two-character escapes (`\t`, `\n`, `\\`), so every real tab byte on
-the line is a field separator and an embedded newline can never break
-framing. Zero candidates is `<id>\t\n` — one empty field.
+everything for JSON.
+
+**Notes** (Phase 3) ride along in the same field as their candidate,
+behind a unit separator (`0x1f`), and only for clients that set
+`"notes":true`:
+
+```
+42\tgco main\x1fgco = git checkout\tgit status\n
+```
+
+A note is annotation — an alias expansion today, a plugin's explanation
+later. It is display text: it never enters `$BUFFER`, and the client strips
+it from anything an accept key can take.
+
+Escaping contract: literal `\t`, `\n`, `0x1f` and `\` in the text become
+two-character escapes (`\t`, `\n`, `\u`, `\\`), so every real tab byte on
+the line is a field separator, every real `0x1f` separates a text from its
+note, and an embedded newline can never break framing. Zero candidates is
+`<id>\t\n` — one empty field.
 
 ## Flow control: one in flight + dirty flag
 
@@ -108,6 +123,23 @@ There is deliberately **no response**: the shell must never wait on
 ingestion, and a lost record is a non-event. Redaction happens daemon-side
 before persistence (secret-shaped commands are skipped entirely).
 
+## Shipping the alias table
+
+The daemon can annotate `gco main` with "gco = git checkout" only if it
+knows the shell's aliases — and aliases live in the shell, not on disk. So
+the client sends them, fire-and-forget like `record`, on connect and again
+whenever the table changes:
+
+```json
+{"v":1,"type":"aliases","session":"host.81021.1722180000","map":{"gco":"git checkout","ll":"ls -la"}}
+```
+
+The daemon holds this per session **in memory only** — alias definitions are
+configuration, not command history, and the store is for history. The
+message is sent from `precmd`, never from the keystroke path, and is capped
+so the write cannot fill the socket buffer; an oversized table is truncated
+(fewer notes) rather than delayed.
+
 ## Liveness
 
 `{"v":1,"type":"ping"}` → `{"v":1,"ok":true,"version":"..."}`. Used by
@@ -131,6 +163,12 @@ enter reconnect backoff.
   worked example: an old daemon ignores it and answers top-1 TSV, which a
   new client renders as a one-row list; a new daemon without `limit` serves
   a Phase 1 client exactly as before.)
+- The same rule shapes how notes were added in Phase 3. A daemon that
+  doesn't know them sends no separator and the new client reads an empty
+  note; a client that doesn't know them never sets `"notes":true`, so it can
+  never receive a byte it would render as command text. Extending an
+  encoding is safe when both "extra field absent" and "extra field ignored"
+  are already meaningful.
 - The AI provider (Phase 5) needs **no** protocol change: `buffer`, `cwd`,
   `recent`, `last_exit` are already on every suggest request.
 - Phase 4 plugins reuse `Query`/`Candidate` JSON shapes over stdio, so a

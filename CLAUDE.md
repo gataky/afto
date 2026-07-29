@@ -10,11 +10,12 @@ a Go daemon (`aftod`) providing history/frecency-ranked candidates over a unix
 socket. It is a non-hijacking rethink of IRIS (a PTY-interposer tool that steals
 TAB and other keys — the failure mode this project exists to avoid).
 
-**Current stage:** Phases 0–2 complete. The `aftod` daemon with history/frecency
-providers plus the async zsh plugin (Phase 1) and the native dropdown — passive
-tier-2 rows and `^O` tier-3 menu mode (Phase 2) — are implemented and gated.
-Next: Phase 3, context intelligence (cwd affinity ranking, `transition`
-provider, alias notes).
+**Current stage:** Phases 0–3 complete. The `aftod` daemon with
+history/frecency/transition providers plus the async zsh plugin (Phase 1), the
+native dropdown — passive tier-2 rows and `^O` tier-3 menu mode (Phase 2) — and
+context intelligence — project-affinity ranking, next-command prediction, alias
+notes (Phase 3) — are implemented and gated. Next: Phase 4, the subprocess
+plugin host and the optional fzf widget.
 
 ## Where truth lives
 
@@ -22,10 +23,12 @@ provider, alias notes).
   provider/plugin model, daemon design, decisions log (§0), and the
   non-disruption test checklist (§6). If implementation deviates from it, update
   it in the same commit.
-- `plans/phase-1.md`, `plans/phase-2.md` — the phase implementation specs (wire
-  protocol, SQLite schema, scoring, dropdown/menu contract, milestones,
-  acceptance gates); `plans/phase-N-report.md` — what actually shipped, gate
-  results, deviations, and the hard-won implementation notes.
+- `plans/phase-N.md` — the phase implementation specs (wire protocol, SQLite
+  schema, scoring, dropdown/menu contract, milestones, acceptance gates);
+  `plans/phase-N-report.md` — what actually shipped, gate results, deviations,
+  and the hard-won implementation notes. **Read the reports before touching
+  the shell client or the harness**: they record ZLE and zpty behaviors that
+  are not discoverable from the code.
 - `docs/protocol.md` — narrative wire-protocol reference: who the clients are,
   the keystroke round trip, why requests are JSON but ZLE responses are TSV,
   one-in-flight flow control, and protocol evolution rules.
@@ -44,9 +47,13 @@ Any change that touches shell integration must preserve these invariants
    `grep -nE 'bindkey.*\\t|expand-or-complete|complete-word|menu-select|compdef|zstyle' <plugin>` must return nothing.
 2. Suggestions render only via `$POSTDISPLAY` + `region_highlight` (display-only);
    `$BUFFER` is written only by explicit accept widgets, only with text already
-   shown as ghost.
-3. Prefix invariant, enforced client-side: display only candidates that strictly
-   extend `$BUFFER`.
+   on screen — the ghost for accept keys, the selected row for menu accept.
+3. Prefix invariant, enforced client-side: only candidates that strictly extend
+   `$BUFFER` are ghosted. Non-extending candidates (next-command predictions on
+   an empty prompt) may appear as menu rows and are reachable *only* by explicit
+   menu accept — structurally, by leaving the ghost empty. On an empty buffer the
+   prefix test is vacuous, so responses are also matched against the buffer they
+   were requested for.
 4. Failure mode is absence of suggestions — never prompt latency, never error
    output to the terminal. Nothing in the keystroke path may block or spawn
    subprocesses.

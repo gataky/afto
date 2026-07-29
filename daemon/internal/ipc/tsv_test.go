@@ -14,6 +14,10 @@ func TestTSVRoundTrip(t *testing.T) {
 		{"backslash-t", `a\` + "\t" + `b`, `a\\\tb`},
 		{"literal-backslash-t", `a\tb`, `a\\tb`},
 		{"unicode", "ls ~/日本語/ファイル", "ls ~/日本語/ファイル"},
+		// A literal unit separator in a command must not look like the
+		// text/note separator on the wire.
+		{"unit-separator", "printf 'a\x1fb'", `printf 'a\ub'`},
+		{"backslash-u", `a\ub`, `a\\ub`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -30,7 +34,7 @@ func TestTSVRoundTrip(t *testing.T) {
 }
 
 func TestEncodeTSVFraming(t *testing.T) {
-	got := string(EncodeTSV(42, []string{"a\tb\nc"}))
+	got := string(EncodeTSV(42, []TSVCandidate{{Text: "a\tb\nc"}}))
 	want := "42\ta\\tb\\nc\n"
 	if got != want {
 		t.Fatalf("EncodeTSV = %q, want %q", got, want)
@@ -44,7 +48,7 @@ func TestEncodeTSVMultiCandidate(t *testing.T) {
 	// Every real tab byte on the wire must be a separator: candidates with
 	// literal tabs/newlines/backslashes arrive escaped, so a client that
 	// splits the line on plain tab gets exactly the fields back.
-	got := string(EncodeTSV(7, []string{"git checkout main", "a\tb", `a\b`}))
+	got := string(EncodeTSV(7, []TSVCandidate{{Text: "git checkout main"}, {Text: "a\tb"}, {Text: `a\b`}}))
 	want := "7\tgit checkout main\ta\\tb\ta\\\\b\n"
 	if got != want {
 		t.Fatalf("EncodeTSV = %q, want %q", got, want)
@@ -55,6 +59,24 @@ func TestEncodeTSVZeroCandidates(t *testing.T) {
 	// The empty response keeps its Phase 1 shape: one empty text field.
 	if got := string(EncodeTSV(9, nil)); got != "9\t\n" {
 		t.Fatalf("EncodeTSV = %q, want %q", got, "9\t\n")
+	}
+}
+
+func TestEncodeTSVNotes(t *testing.T) {
+	// No note: byte-identical to a Phase 2 line, which is what lets an old
+	// client read a new daemon's reply.
+	if got := string(EncodeTSV(1, []TSVCandidate{{Text: "gco main"}})); got != "1\tgco main\n" {
+		t.Fatalf("got %q", got)
+	}
+	got := string(EncodeTSV(1, []TSVCandidate{{Text: "gco main", Note: "gco = git checkout"}}))
+	if got != "1\tgco main\x1fgco = git checkout\n" {
+		t.Fatalf("got %q", got)
+	}
+	// Both halves are escaped, so the separators stay unambiguous even
+	// when the text or the note contains one.
+	got = string(EncodeTSV(1, []TSVCandidate{{Text: "printf 'a\x1fb'", Note: "x\ty"}}))
+	if want := "1\t" + `printf 'a\ub'` + "\x1f" + `x\ty` + "\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/gataky/afto/daemon/internal/config"
 	"github.com/gataky/afto/daemon/internal/ipc"
+	"github.com/gataky/afto/daemon/internal/project"
 	"github.com/gataky/afto/daemon/internal/provider"
 	"github.com/gataky/afto/daemon/internal/store"
 )
@@ -154,16 +155,31 @@ func runServe(ctx context.Context, o serveOpts) error {
 	if pc.Frecency {
 		providers = append(providers, provider.NewFrecency(st))
 	}
+	if pc.Transition {
+		providers = append(providers, provider.NewTransition(st))
+	}
 	budget := func() time.Duration {
 		return time.Duration(mgr.Get().LatencyBudgetMS) * time.Millisecond
 	}
 	engine := provider.NewEngine(log, budget, providers...)
+	var aliases *provider.AliasNote
+	if pc.AliasNote {
+		aliases = provider.NewAliasNote()
+		engine.Use(aliases)
+	}
 
 	l, err := net.Listen("unix", o.socket)
 	if err != nil {
 		return err
 	}
-	srv := ipc.NewServer(&core{engine: engine, st: st, log: log, version: o.version}, log)
+	srv := ipc.NewServer(&core{
+		engine:   engine,
+		st:       st,
+		projects: project.New(mgr.Get().Project.Markers),
+		aliases:  aliases,
+		log:      log,
+		version:  o.version,
+	}, log)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -185,13 +201,20 @@ func runServe(ctx context.Context, o serveOpts) error {
 // core implements ipc.Handler: the seam where transport meets providers and
 // storage.
 type core struct {
-	engine  *provider.Engine
-	st      *store.Store
-	log     *slog.Logger
-	version string
+	engine   *provider.Engine
+	st       *store.Store
+	projects *project.Resolver
+	aliases  *provider.AliasNote // nil when the alias_note decorator is off
+	log      *slog.Logger
+	version  string
 }
 
+// Suggest resolves the query's project before ranking. Clients send only a
+// cwd — "which project is that in" is a filesystem question, so the daemon
+// answers it (cached; see the project package) rather than making every
+// client implement the walk.
 func (c *core) Suggest(ctx context.Context, q provider.Query) []provider.Candidate {
+	q.ProjectRoot = c.projects.Root(q.CWD)
 	return c.engine.Suggest(ctx, q)
 }
 
@@ -215,6 +238,18 @@ func (c *core) Record(r ipc.Request) {
 	if !ok {
 		c.log.Debug("command skipped by redaction")
 	}
+}
+
+// SetAliases stores a shell's alias table for annotation. Aliases are
+// session-scoped in-memory state: they are user configuration rather than
+// command history, so nothing here touches the store or the log's info
+// level (an alias body can be as private as a command line).
+func (c *core) SetAliases(r ipc.Request) {
+	if c.aliases == nil {
+		return
+	}
+	c.aliases.Set(r.Session, r.Map)
+	c.log.Debug("alias table updated", "session", r.Session, "entries", len(r.Map))
 }
 
 func (c *core) Version() string { return c.version }

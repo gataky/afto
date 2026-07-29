@@ -134,7 +134,11 @@ not free (emacs `forward-word`); it participates only via the wrap-at-EOL rule.
    provider (or future AI) structurally cannot rewrite the line.
    Exception: tier-2/3 list rows may show non-prefix candidates (e.g. transition
    predictions on an empty prompt), but they enter the buffer only via explicit
-   menu-mode accept, never via ghost-accept keys.
+   menu-mode accept, never via ghost-accept keys. Enforced structurally: the
+   client leaves the ghost empty for such candidates, and every accept widget
+   consumes the ghost, so no code path can take one. On an empty buffer the
+   prefix test itself is vacuous, so responses are additionally matched to the
+   buffer they were requested for.
 4. **Staleness check**: async responses carry the buffer they were computed for;
    discard if `$BUFFER` changed.
 5. **Context guards**: suggest only when `$CONTEXT == start` — never in isearch,
@@ -182,13 +186,21 @@ type Candidate struct {
 - **Built-in providers (roadmap order):**
   1. `history` — prefix match over imported + live-ingested history.
   2. `frecency` — frequency × recency × **cwd/project affinity** (rank by what you
-     actually run in this repo). SQLite store; scoring ideas adapted from IRIS
+     actually run in this repo). Three scored terms: global, exact directory, and
+     the enclosing project (nearest ancestor with a `.git`-style marker, resolved
+     daemon-side and cached). SQLite store; scoring ideas adapted from IRIS
      `internal/scoring` (0BSD).
   3. `transition` — next-command prediction from an empty prompt
      (`git add …` → suggest `git commit`), from recorded command-pair stats.
+     Pairs are learned from executed commands only: an imported `HISTFILE`
+     interleaves terminals, so its consecutive lines are not causally related.
   4. `alias-note` — annotates candidates with their alias expansion as a dim note
      in the list (informational only; never rewrites the buffer — the disruptive
-     IRIS auto-expand-on-space is explicitly rejected).
+     IRIS auto-expand-on-space is explicitly rejected). Implemented as a
+     post-merge **decorator**, not a Provider: it adds information to other
+     sources' candidates rather than producing its own. The shell ships its
+     alias table (`docs/protocol.md`); the daemon holds it per session, in
+     memory only.
   5. `ai` — **future, off by default.** Same interface, same prefix invariant,
      debounce + cache; adding it is config + one struct, no architecture change.
 - **Explicitly out of scope:** Fig-style command-spec database (subcommand/flag
@@ -273,8 +285,10 @@ afto/
   `region_highlight` rows) and tier-3 menu mode (custom keymap via `^O`). Exit
   criteria: checklist passes *with the list visible*; menu mode never activates
   without explicit entry. (`plans/phase-2-report.md`)
-- **Phase 3 — Context intelligence:** cwd/project-affinity ranking, `transition`
-  provider (empty-prompt next-command rows in the menu), alias-expansion notes.
+- **Phase 3 — Context intelligence (done):** cwd/project-affinity ranking,
+  `transition` provider (next-command rows, reached by explicit `^O` on an empty
+  prompt — nothing is shown unprompted; `AFTO_EMPTY_ROWS` opts into passive
+  rows), alias-expansion notes. (`plans/phase-3-report.md`)
 - **Phase 4 — Plugin host + fzf widget:** subprocess plugin runtime with circuit
   breaker + a sample plugin; optional `aftod query --list | fzf` widget and
   frecency-fed `^R` alternative.

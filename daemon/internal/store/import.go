@@ -127,7 +127,7 @@ func (s *Store) ImportHistfile(ctx context.Context, path string) (ImportStats, e
 	}
 	defer insEvent.Close()
 	for _, e := range kept {
-		if _, err := insEvent.ExecContext(ctx, e.cmd, "", "import", 0, e.ts); err != nil {
+		if _, err := insEvent.ExecContext(ctx, e.cmd, "", importSession, 0, e.ts); err != nil {
 			return st, fmt.Errorf("store: import: %w", err)
 		}
 	}
