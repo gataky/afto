@@ -29,6 +29,9 @@
 zmodload zsh/net/socket 2>/dev/null || return 0
 zmodload zsh/datetime 2>/dev/null || return 0
 zmodload zsh/system 2>/dev/null || return 0
+# zsh/parameter exposes $aliases. Optional: without it we simply never send
+# an alias table and candidates go un-annotated.
+zmodload zsh/parameter 2>/dev/null
 autoload -Uz add-zle-hook-widget add-zsh-hook || return 0
 
 : ${AFTO_HIGHLIGHT:="fg=8"}            # ghost style; dim = "this came from afto, not you"
@@ -37,6 +40,11 @@ autoload -Uz add-zle-hook-widget add-zsh-hook || return 0
 : ${AFTO_ACCEPT_KEY:="^]"}    # dedicated accept key (unbound in emacs keymap)
 : ${AFTO_MENU_KEY:="^O"}      # tier-3 menu mode entry (rare-by-default binding)
 : ${AFTO_ROWS:=4}             # passive list rows below the ghost, 0..10 (0 = ghost only)
+# Rows to show UNPROMPTED on an empty line. Default 0 — next-command
+# predictions are worth having, but printing them under every fresh prompt
+# would move the prompt after every command. At 0 they are one ^O away;
+# raise it if you want them always visible.
+: ${AFTO_EMPTY_ROWS:=0}
 : ${AFTO_CMD:="aftod"}        # daemon binary (PATH or absolute)
 # AFTO_DEBUG=<file>: append a client-side event trace (connects, sends,
 # responses, displays). The only sanctioned diagnostic output — it goes to a
@@ -53,17 +61,22 @@ typeset -g  _afto_sock=""           # resolved socket path
 typeset -g  _afto_fd=""             # connected fd ("" = disconnected)
 typeset -gi _afto_req_id=0          # monotonically increasing request id
 typeset -g  _afto_inflight=""       # id awaiting a response ("" = idle)
+typeset -g  _afto_req_buffer=""     # the buffer that in-flight request was made for
 typeset -gi _afto_dirty=0           # buffer changed while a request was in flight
 typeset -g  _afto_shown=""          # full text of the SELECTED candidate on display
 typeset -g  _afto_ghost=""          # its remainder past $BUFFER (the dim part);
                                     # accepts consume this, never $POSTDISPLAY,
                                     # which since Phase 2 also holds list rows
 typeset -ga _afto_cands=()          # last response's candidates (staleness-filtered at render)
+typeset -ga _afto_cnotes=()         # their notes, index-parallel to _afto_cands
 typeset -ga _afto_disp=()           # candidates currently rendered as rows
+typeset -ga _afto_dnotes=()         # their notes, index-parallel to _afto_disp
 typeset -gi _afto_sel=1             # selected row (1 unless menu mode moved it)
 typeset -ga _afto_hl=()             # our region_highlight entries, for exact removal
 typeset -gi _afto_menu_active=0     # tier-3 menu mode engaged (afto-menu keymap live)
 typeset -g  _afto_menu_prev=""      # keymap to restore on menu exit
+typeset -g  _afto_last_cmd=""       # previous command, sent as `recent` context
+typeset -g  _afto_alias_sig=""      # snapshot of the alias table, to detect edits
 typeset -gi _afto_last_spawn=0      # last daemon spawn attempt (spawn backoff)
 typeset -gi _afto_last_exit=0       # $? of the previous command, sent as context
 typeset -g  _afto_pending_cmd=""    # command captured by preexec, recorded in precmd
@@ -74,7 +87,13 @@ typeset -g  _afto_session=""
 typeset -gi _afto_rows=$AFTO_ROWS
 (( _afto_rows < 0 )) && _afto_rows=0
 (( _afto_rows > 10 )) && _afto_rows=10
+typeset -gi _afto_empty_rows=$AFTO_EMPTY_ROWS
+(( _afto_empty_rows < 0 )) && _afto_empty_rows=0
+(( _afto_empty_rows > 10 )) && _afto_empty_rows=10
+# Ask for enough candidates to fill the menu even when passive rows are
+# off, so ^O has something to open.
 typeset -gi _afto_limit=$(( _afto_rows > 0 ? _afto_rows : 1 ))
+(( _afto_empty_rows > _afto_limit )) && _afto_limit=$_afto_empty_rows
 
 # Socket path mirrors daemon/cmd/aftod/paths.go — keep in sync.
 if [[ -n $AFTO_SOCKET ]]; then
@@ -109,6 +128,7 @@ _afto_tsv_unescape() {
   s=${s//'\\'/$ph}
   s=${s//'\t'/$'\t'}
   s=${s//'\n'/$'\n'}
+  s=${s//'\u'/$'\x1f'}
   s=${s//$ph/'\'}
   REPLY=$s
 }
@@ -158,6 +178,7 @@ _afto_clear() {
   _afto_shown=""
   _afto_ghost=""
   _afto_disp=()
+  _afto_dnotes=()
   local e
   for e in $_afto_hl; do
     region_highlight=(${region_highlight:#$e})
@@ -167,38 +188,61 @@ _afto_clear() {
 
 # The one display pipeline: filter the cached candidates against the
 # CURRENT $BUFFER, then paint the selected candidate's remainder as the
-# ghost and up to _afto_rows candidates as list rows. Prefix invariant,
-# staleness, and the single-line guard all live in the filter — a late
-# async response, a menu navigation, and a fast-path keystroke all go
-# through here and cannot display anything that doesn't strictly extend
-# what the user actually typed. The explicit non-empty-BUFFER check
-# matters: with BUFFER="" the extension pattern would accept ANY text,
-# and a late response could paint onto a brand-new empty prompt.
+# ghost and up to N candidates as list rows. Prefix invariant, staleness,
+# and the single-line guard all live in the filter — a late async response,
+# a menu navigation, and a fast-path keystroke all go through here and
+# cannot display anything that doesn't strictly extend what the user
+# actually typed.
+#
+# The empty buffer is the one case where candidates are NOT extensions of
+# anything: those are next-command predictions (DESIGN.md §2.4.3), so they
+# render as rows while _afto_ghost stays empty. That single omission is
+# what makes them unreachable by every accept key — the widgets consume the
+# ghost, so an empty ghost means nothing can be accepted except through
+# explicit menu entry.
 _afto_render() {
   emulate -L zsh
   _afto_clear
-  [[ -n $BUFFER && $BUFFER != *$'\n'* ]] || return 0
-  local -a disp
+  [[ $BUFFER != *$'\n'* ]] || return 0
+
+  # How many rows this state warrants: a typed line uses AFTO_ROWS; a bare
+  # prompt shows nothing unless the user asked (menu) or opted in.
+  local -i rows=$_afto_rows
+  if [[ -z $BUFFER ]]; then
+    (( _afto_menu_active )) && rows=$_afto_rows || rows=$_afto_empty_rows
+  fi
+
+  local -a disp dnotes
   local c
+  local -i i=0
   for c in $_afto_cands; do
+    (( i++ ))
     [[ $c == ${BUFFER}?* && $c != *$'\n'* ]] || continue
-    disp+=($c)
+    disp+=("$c")
+    dnotes+=("${_afto_cnotes[i]}")
     (( ${#disp} == _afto_limit )) && break
   done
   (( ${#disp} )) || return 0
   (( _afto_sel > ${#disp} )) && _afto_sel=${#disp}
   (( _afto_sel < 1 )) && _afto_sel=1
-  _afto_disp=($disp)
-  _afto_shown=${disp[_afto_sel]}
-  _afto_ghost=${_afto_shown#$BUFFER}
+  _afto_disp=("${disp[@]}")
+  _afto_dnotes=("${dnotes[@]}")
 
-  local post=$_afto_ghost
-  local -i B=${#BUFFER} start i=0
+  local post=""
+  if [[ -n $BUFFER ]]; then
+    _afto_shown=${disp[_afto_sel]}
+    _afto_ghost=${_afto_shown#$BUFFER}
+    post=$_afto_ghost
+  fi
+
+  local -i B=${#BUFFER} start
   local -a hl
-  hl=("$B $(( B + ${#post} )) $AFTO_HIGHLIGHT")
-  if (( _afto_rows > 0 )); then
-    for c in $disp; do
+  [[ -n $post ]] && hl=("$B $(( B + ${#post} )) $AFTO_HIGHLIGHT")
+  if (( rows > 0 )); then
+    i=0
+    for c in "${disp[@]}"; do
       (( i++ ))
+      (( i > rows )) && break
       start=$(( B + ${#post} + 1 ))     # +1: highlight starts after the \n
       if (( i == _afto_sel )); then
         post+=$'\n'"  ▸ $c"
@@ -207,31 +251,53 @@ _afto_render() {
         post+=$'\n'"    $c"
         hl+=("$start $(( B + ${#post} )) $AFTO_HIGHLIGHT_ROW")
       fi
+      # The note trails its row in the dim row style even when the row
+      # itself is selected: it is annotation, not part of the command, and
+      # styling it differently is what keeps that visually obvious.
+      if [[ -n ${dnotes[i]} ]]; then
+        start=$(( B + ${#post} ))
+        post+="  ${dnotes[i]}"
+        hl+=("$start $(( B + ${#post} )) $AFTO_HIGHLIGHT_ROW")
+      fi
     done
   fi
   POSTDISPLAY=$post
-  _afto_hl=($hl)
-  region_highlight+=($hl)
+  _afto_hl=("${hl[@]}")
+  region_highlight+=("${hl[@]}")
 }
 
 # --- async request/response ----------------------------------------------------
 
+# Is a query warranted right now? A typed line always is. An empty line is
+# only when the user asked for predictions — via ^O (menu pending) or by
+# opting into passive empty rows. Without this the dirty-flag chase in
+# _afto_process would query every fresh prompt.
+_afto_may_query() {
+  [[ -n $BUFFER ]] && return 0
+  (( _afto_empty_rows > 0 || _afto_menu_active )) && return 0
+  return 1
+}
+
 _afto_request() {
-  # Guarded here, not just in the hook: the dirty-flag chase in
-  # _afto_response can land on a fresh empty prompt, where there is nothing
-  # to ask about. ${CURSOR:-0} likewise: zle special params are not always
-  # populated in zle -F handler context.
-  [[ -n $BUFFER ]] || return 1
+  # ${CURSOR:-0}: zle special params are not always populated in zle -F
+  # handler context.
+  _afto_may_query || return 1
   [[ -n $_afto_fd ]] || _afto_connect || return 1
   zle -F $_afto_fd _afto_response 2>/dev/null
-  local REPLY buf cwd
+  local REPLY buf cwd recent=""
   _afto_json_escape "$BUFFER"; buf=$REPLY
   _afto_json_escape "$PWD";    cwd=$REPLY
+  # The previous command is what next-command prediction keys off. Sent
+  # only when there is one, to keep the common message small.
+  if [[ -n $_afto_last_cmd ]]; then
+    _afto_json_escape "$_afto_last_cmd"
+    recent=",\"recent\":[\"$REPLY\"]"
+  fi
   (( _afto_req_id++ ))
   # Small write (buffer-sized) into a local socket: cannot meaningfully
   # block. A write error means the daemon died — silently drop the
   # connection; reconnect happens on a later keystroke.
-  local msg="{\"v\":1,\"type\":\"suggest\",\"id\":$_afto_req_id,\"fmt\":\"tsv\",\"limit\":$_afto_limit,\"buffer\":\"$buf\",\"cursor\":${CURSOR:-0},\"cwd\":\"$cwd\",\"last_exit\":$_afto_last_exit,\"session\":\"$_afto_session\"}"
+  local msg="{\"v\":1,\"type\":\"suggest\",\"id\":$_afto_req_id,\"fmt\":\"tsv\",\"limit\":$_afto_limit,\"notes\":true,\"buffer\":\"$buf\",\"cursor\":${CURSOR:-0},\"cwd\":\"$cwd\",\"last_exit\":$_afto_last_exit,\"session\":\"$_afto_session\"$recent}"
   _afto_debug "send $msg"
   if ! print -u $_afto_fd -r -- $msg 2>/dev/null; then
     _afto_debug "send failed; disconnecting"
@@ -239,7 +305,39 @@ _afto_request() {
     return 1
   fi
   _afto_inflight=$_afto_req_id
+  _afto_req_buffer=$BUFFER
   _afto_dirty=0
+}
+
+# Ship the shell's alias table so the daemon can annotate candidates with
+# what they expand to (docs/protocol.md "Shipping the alias table").
+#
+# Called from precmd and on connect — never from the keystroke path. The
+# cap matters for the same reason: this is the one message whose size the
+# user controls, and a write large enough to fill the socket buffer would
+# block the prompt. Past the cap we send fewer aliases (fewer notes),
+# which is a cosmetic loss, rather than risk the prompt.
+_afto_send_aliases() {
+  (( ${+aliases} )) || return 0
+  [[ -n $_afto_fd ]] || return 0
+  local sig=${(j:\0:)${(kv)aliases}}
+  [[ $sig == $_afto_alias_sig ]] && return 0     # unchanged since last send
+  _afto_alias_sig=$sig
+
+  local -a parts
+  local k v REPLY ek ev
+  local -i bytes=0
+  for k v in "${(@kv)aliases}"; do
+    _afto_json_escape "$k"; ek=$REPLY
+    _afto_json_escape "$v"; ev=$REPLY
+    (( bytes += ${#ek} + ${#ev} + 6 ))
+    (( bytes > 6000 )) && break
+    parts+=("\"$ek\":\"$ev\"")
+  done
+  local msg="{\"v\":1,\"type\":\"aliases\",\"session\":\"$_afto_session\",\"map\":{${(j:,:)parts}}}"
+  _afto_debug "aliases ${#parts} entries"
+  print -u $_afto_fd -r -- $msg 2>/dev/null || _afto_disconnect
+  return 0
 }
 
 # zle -F handler: ZLE calls this when the socket fd is readable, i.e. a
@@ -270,29 +368,48 @@ _afto_response() {
 # daemon that ignores "limit" just yields a one-candidate list).
 _afto_process() {
   emulate -L zsh
-  local line=$_afto_stash REPLY f
+  local line=$_afto_stash REPLY f text note
   _afto_stash=""
-  local -a fields cands
+  local -a fields cands notes
   fields=("${(@ps:\t:)line}")
   local id=$fields[1]
-  _afto_debug "process id=$id fields=$(( ${#fields} - 1 )) inflight=$_afto_inflight dirty=$_afto_dirty buffer=${(q)BUFFER}"
+  _afto_debug "process id=$id fields=$(( ${#fields} - 1 )) inflight=$_afto_inflight dirty=$_afto_dirty menu=$_afto_menu_active buffer=${(q)BUFFER}"
 
   [[ $id == $_afto_inflight ]] || return 0   # response to an abandoned request
   _afto_inflight=""
+  local for_buffer=$_afto_req_buffer
   if (( _afto_dirty )); then
     _afto_request             # buffer moved on; chase it with a fresh query
   fi
+  # Answers belong to the line they were asked about. For a typed line the
+  # prefix filter would catch a mismatch anyway, but on an EMPTY line every
+  # candidate "extends" the buffer, so without this an answer computed for
+  # the previous command line would be cached as if it were a prediction
+  # for this prompt — and ^O would open a menu of it.
+  [[ $BUFFER == $for_buffer ]] || return 0
 
+  # Each field is "text" or "text<US>note" (docs/protocol.md). A daemon
+  # that predates notes simply never includes the separator.
   for f in "${(@)fields[2,-1]}"; do
     [[ -n $f ]] || continue
-    _afto_tsv_unescape "$f"
-    cands+=("$REPLY")
+    text=${f%%$'\x1f'*}
+    note=""
+    [[ $f == *$'\x1f'* ]] && note=${f#*$'\x1f'}
+    _afto_tsv_unescape "$text"; cands+=("$REPLY")
+    if [[ -n $note ]]; then
+      _afto_tsv_unescape "$note"; notes+=("$REPLY")
+    else
+      notes+=("")
+    fi
   done
   # Replace the cache and render against the buffer AS IT IS NOW, not as
   # it was when the request was sent: _afto_render's extension filter is
   # the staleness check. An empty response clears a now-unbacked display.
-  _afto_cands=($cands)
-  _afto_sel=1
+  _afto_cands=("${cands[@]}")
+  _afto_cnotes=("${notes[@]}")
+  # Keep the selection while the menu is open: this response is filling in
+  # a menu the user is already navigating.
+  (( _afto_menu_active )) || _afto_sel=1
   _afto_render
   zle -R
   return 0
@@ -312,8 +429,9 @@ _afto_suggest() {
     _afto_menu_active=0
     _afto_sel=1
   fi
-  # Only at a normal toplevel prompt, single-line, non-empty buffer.
-  if [[ $CONTEXT != start || -z $BUFFER || $BUFFER == *$'\n'* ]]; then
+  # Only at a normal toplevel prompt, single-line. An empty buffer is a
+  # legitimate query only when predictions were asked for.
+  if [[ $CONTEXT != start || $BUFFER == *$'\n'* ]] || { [[ -z $BUFFER ]] && ! _afto_may_query }; then
     _afto_clear
     return 0
   fi
@@ -333,6 +451,10 @@ _afto_suggest() {
 _afto_line_finish() {
   emulate -L zsh
   _afto_clear   # Enter executes only $BUFFER; don't ghost/list the scrollback
+  # Predictions are about what follows the command being run now, so the
+  # cache is stale by definition once the line is accepted.
+  _afto_cands=()
+  _afto_cnotes=()
 }
 
 # --- history ingestion (docs/protocol.md "Recording history") -------------------
@@ -349,10 +471,17 @@ _afto_precmd() {
   local -i code=$?
   _afto_last_exit=$code
   _afto_debug "precmd exit=$code pending=${(q)_afto_pending_cmd}"
+  [[ -n $_afto_fd ]] || _afto_connect
+  # Alias definitions can change at any prompt (a sourced file, an
+  # interactive `alias`), so re-check here — cheap, and off the keystroke
+  # path. Sends only when the table actually differs.
+  _afto_send_aliases
   [[ -n $_afto_pending_cmd ]] || return 0
   local cmd=$_afto_pending_cmd REPLY c cwd
   _afto_pending_cmd=""
-  [[ -n $_afto_fd ]] || _afto_connect || return 0
+  # What just ran is the context next-command prediction keys off.
+  _afto_last_cmd=$cmd
+  [[ -n $_afto_fd ]] || return 0
   _afto_json_escape "$cmd"; c=$REPLY
   _afto_json_escape "$PWD"; cwd=$REPLY
   # Fire-and-forget: record has no response by design.
@@ -407,15 +536,42 @@ _afto_forward_word() {
 # the user opts in — and any key the menu doesn't know exits it and replays
 # through the restored keymap, so afto never interprets a key itself.
 
-_afto_menu_enter() {
-  emulate -L zsh
-  # Only meaningful with visible rows; otherwise a silent no-op (no beep,
-  # no output — AFTO_MENU_KEY is claimed, its fallback behavior is "nothing").
-  (( _afto_rows > 0 && ${#_afto_disp} > 0 )) || return 0
+# Switch into the menu keymap. Callable from any widget context, including
+# the response handler's widget (that is how an empty-prompt ^O opens once
+# its predictions arrive).
+_afto_menu_start() {
   _afto_menu_active=1
   _afto_menu_prev=$KEYMAP
   zle -K afto-menu
   _afto_debug "menu enter (from $_afto_menu_prev)"
+}
+
+# Entering the menu is ALWAYS synchronous, in this widget. Switching
+# keymaps from the response handler's widget does not stick — ZLE keeps
+# reading with the keymap that was current when the key was awaited, so an
+# async `zle -K` silently loses the next keystroke to the old keymap (a
+# menu Enter would execute the line instead of accepting a row). Hence:
+# open now, fill in when the answer arrives.
+_afto_menu_enter() {
+  emulate -L zsh
+  (( _afto_rows > 0 )) || return 0   # rows disabled: nothing to navigate
+  # With a typed line and nothing displayed, there is no list to enter —
+  # opening an empty menu there would just swallow a keystroke.
+  (( ${#_afto_disp} > 0 )) || [[ -z $BUFFER ]] || return 0
+
+  _afto_menu_start
+  # A bare prompt has nothing cached: ask what usually comes next. Until
+  # the answer lands the menu is open but empty, which is harmless — every
+  # key it doesn't know exits and replays natively, so a daemon that never
+  # answers makes ^O indistinguishable from a no-op.
+  if (( ${#_afto_disp} == 0 )); then
+    if [[ -n $_afto_inflight ]]; then
+      _afto_dirty=1
+    else
+      _afto_request
+    fi
+  fi
+  _afto_render
   return 0
 }
 
@@ -447,13 +603,17 @@ _afto_menu_accept() {
   emulate -L zsh
   local pick=${_afto_disp[_afto_sel]}
   _afto_menu_stop
-  if [[ -n $pick ]]; then
-    BUFFER=$pick
-    CURSOR=${#BUFFER}
-    _afto_clear
-  else
+  # Nothing selected (an empty menu still waiting on its answer): behave
+  # exactly like any other unknown key — exit and let Enter do its native
+  # job, rather than swallowing it.
+  if [[ -z $pick ]]; then
     _afto_render
+    zle -U -- "$KEYS"
+    return 0
   fi
+  BUFFER=$pick
+  CURSOR=${#BUFFER}
+  _afto_clear
   return 0
 }
 
