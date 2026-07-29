@@ -35,6 +35,7 @@ autoload -Uz add-zle-hook-widget add-zsh-hook || return 0
 : ${AFTO_HIGHLIGHT_ROW:="fg=8"}        # passive list rows
 : ${AFTO_HIGHLIGHT_SELECTED:="standout"} # the ▸-marked row
 : ${AFTO_ACCEPT_KEY:="^]"}    # dedicated accept key (unbound in emacs keymap)
+: ${AFTO_MENU_KEY:="^O"}      # tier-3 menu mode entry (rare-by-default binding)
 : ${AFTO_ROWS:=4}             # passive list rows below the ghost, 0..10 (0 = ghost only)
 : ${AFTO_CMD:="aftod"}        # daemon binary (PATH or absolute)
 # AFTO_DEBUG=<file>: append a client-side event trace (connects, sends,
@@ -61,6 +62,8 @@ typeset -ga _afto_cands=()          # last response's candidates (staleness-filt
 typeset -ga _afto_disp=()           # candidates currently rendered as rows
 typeset -gi _afto_sel=1             # selected row (1 unless menu mode moved it)
 typeset -ga _afto_hl=()             # our region_highlight entries, for exact removal
+typeset -gi _afto_menu_active=0     # tier-3 menu mode engaged (afto-menu keymap live)
+typeset -g  _afto_menu_prev=""      # keymap to restore on menu exit
 typeset -gi _afto_last_spawn=0      # last daemon spawn attempt (spawn backoff)
 typeset -gi _afto_last_exit=0       # $? of the previous command, sent as context
 typeset -g  _afto_pending_cmd=""    # command captured by preexec, recorded in precmd
@@ -299,6 +302,16 @@ _afto_process() {
 
 _afto_suggest() {
   emulate -L zsh
+  # Menu mode: navigation widgets fire this hook too, but the buffer cannot
+  # have changed — re-rendering here would reset the selection. The keymap
+  # comparison doubles as self-healing: an abort (^C) starts a fresh line in
+  # the main keymap without running any exit widget, so a live flag with a
+  # non-menu keymap means "menu died"; fall through to normal suggesting.
+  if (( _afto_menu_active )); then
+    [[ $KEYMAP == afto-menu ]] && return 0
+    _afto_menu_active=0
+    _afto_sel=1
+  fi
   # Only at a normal toplevel prompt, single-line, non-empty buffer.
   if [[ $CONTEXT != start || -z $BUFFER || $BUFFER == *$'\n'* ]]; then
     _afto_clear
@@ -387,6 +400,81 @@ _afto_forward_word() {
   fi
 }
 
+# --- tier-3 menu mode (DESIGN.md §2.1/§2.2): explicit entry, dedicated keymap ----
+# Modeled on how zsh's own menu selection works: a separate keymap that
+# exists only between explicit entry (AFTO_MENU_KEY) and exit. Because the
+# prompt-level keymap is untouched, arrows/TAB/everything stay native until
+# the user opts in — and any key the menu doesn't know exits it and replays
+# through the restored keymap, so afto never interprets a key itself.
+
+_afto_menu_enter() {
+  emulate -L zsh
+  # Only meaningful with visible rows; otherwise a silent no-op (no beep,
+  # no output — AFTO_MENU_KEY is claimed, its fallback behavior is "nothing").
+  (( _afto_rows > 0 && ${#_afto_disp} > 0 )) || return 0
+  _afto_menu_active=1
+  _afto_menu_prev=$KEYMAP
+  zle -K afto-menu
+  _afto_debug "menu enter (from $_afto_menu_prev)"
+  return 0
+}
+
+# Shared exit: restore the keymap and passive selection. Safe to call only
+# from inside a widget (zle -K needs an active ZLE).
+_afto_menu_stop() {
+  _afto_menu_active=0
+  _afto_sel=1
+  zle -K ${_afto_menu_prev:-main}
+}
+
+_afto_menu_up() {
+  emulate -L zsh
+  (( _afto_sel > 1 )) && (( _afto_sel-- ))
+  _afto_render
+  return 0
+}
+
+_afto_menu_down() {
+  emulate -L zsh
+  (( _afto_sel < ${#_afto_disp} )) && (( _afto_sel++ ))
+  _afto_render
+  return 0
+}
+
+# Enter: the selected row's text — already on display — becomes the buffer.
+# It is NOT executed; the user reviews/edits and presses Enter again.
+_afto_menu_accept() {
+  emulate -L zsh
+  local pick=${_afto_disp[_afto_sel]}
+  _afto_menu_stop
+  if [[ -n $pick ]]; then
+    BUFFER=$pick
+    CURSOR=${#BUFFER}
+    _afto_clear
+  else
+    _afto_render
+  fi
+  return 0
+}
+
+_afto_menu_esc() {
+  emulate -L zsh
+  _afto_menu_stop
+  _afto_render   # back to passive: marker returns to row 1
+  return 0
+}
+
+# Catch-all for every key the menu doesn't bind: exit, then push the key
+# back onto the input queue so it is reinterpreted by the restored keymap —
+# printables self-insert, control keys do their native thing.
+_afto_menu_other() {
+  emulate -L zsh
+  _afto_menu_stop
+  _afto_render
+  zle -U -- "$KEYS"
+  return 0
+}
+
 # --- user command ----------------------------------------------------------------
 
 afto() {
@@ -399,6 +487,9 @@ afto() {
       zle -A .forward-char forward-char 2>/dev/null
       zle -A .forward-word forward-word 2>/dev/null
       bindkey -r "$AFTO_ACCEPT_KEY"
+      bindkey -r "$AFTO_MENU_KEY"
+      bindkey -D afto-menu 2>/dev/null   # menu cannot be active here: running
+      _afto_menu_active=0                # a command means the line was accepted
       _afto_clear 2>/dev/null
       _afto_disconnect
       print "afto: disabled for this session"
@@ -434,7 +525,32 @@ zle -N afto-accept _afto_accept_full
 zle -N forward-char _afto_forward_char
 zle -N forward-word _afto_forward_word
 zle -N _afto_process
+zle -N afto-menu-enter _afto_menu_enter
+zle -N _afto_menu_up
+zle -N _afto_menu_down
+zle -N _afto_menu_accept
+zle -N _afto_menu_esc
+zle -N _afto_menu_other
 bindkey "$AFTO_ACCEPT_KEY" afto-accept
+bindkey "$AFTO_MENU_KEY" afto-menu-enter
+
+# The tier-3 keymap. Built parentless, then given a catch-all so that any
+# key without an explicit meaning below exits the menu and replays natively
+# (via _afto_menu_other). Only ^O — an explicit, configurable action — can
+# make this keymap current; at the prompt it does not exist as far as key
+# handling is concerned.
+bindkey -N afto-menu
+bindkey -M afto-menu -R "^@-^?" _afto_menu_other          # 0x00–0x7f
+bindkey -M afto-menu -R "\M-^@-\M-^?" _afto_menu_other    # 0x80–0xff (incl. UTF-8 lead bytes)
+bindkey -M afto-menu "^[[A" _afto_menu_up      # arrows: CSI and SS3 encodings
+bindkey -M afto-menu "^[OA" _afto_menu_up
+bindkey -M afto-menu "^P"   _afto_menu_up
+bindkey -M afto-menu "^[[B" _afto_menu_down
+bindkey -M afto-menu "^[OB" _afto_menu_down
+bindkey -M afto-menu "^N"   _afto_menu_down
+bindkey -M afto-menu "^M"   _afto_menu_accept
+bindkey -M afto-menu "^J"   _afto_menu_accept
+bindkey -M afto-menu "^["   _afto_menu_esc
 
 # Optimistic connect so the first keystroke already has a live socket (and
 # a cold system starts the daemon now rather than mid-typing). On a cold
