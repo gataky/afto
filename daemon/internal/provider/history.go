@@ -14,7 +14,7 @@ import (
 // SQLite, and so this package never grows a dependency on storage details
 // beyond these two queries.
 type statsReader interface {
-	PrefixStats(ctx context.Context, prefix, cwd string, limit int) ([]store.StatRow, error)
+	PrefixStats(ctx context.Context, prefix, cwd, root string, limit int) ([]store.StatRow, error)
 	MostRecentPrefix(ctx context.Context, prefix string, limit int) ([]store.StatRow, error)
 }
 

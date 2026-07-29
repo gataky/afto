@@ -33,7 +33,7 @@ func TestImportExtendedFormat(t *testing.T) {
 		t.Fatalf("stats = %+v", st)
 	}
 
-	rows, err := s.PrefixStats(ctx, "git status", "", 10)
+	rows, err := s.PrefixStats(ctx, "git status", "", "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestImportMultilineExtended(t *testing.T) {
 	if st.Commands != 2 || st.Imported != 2 {
 		t.Fatalf("stats = %+v", st)
 	}
-	rows, err := s.PrefixStats(ctx, "for f", "", 10)
+	rows, err := s.PrefixStats(ctx, "for f", "", "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestImportUnmetafiesMultibyte(t *testing.T) {
 	if _, err := s.ImportHistfile(ctx, hist); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := s.PrefixStats(ctx, "ls ", "", 10)
+	rows, err := s.PrefixStats(ctx, "ls ", "", "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}

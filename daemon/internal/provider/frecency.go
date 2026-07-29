@@ -33,7 +33,7 @@ func (f *Frecency) Suggest(ctx context.Context, q Query) ([]Candidate, error) {
 	if q.Buffer == "" {
 		return nil, nil
 	}
-	rows, err := f.stats.PrefixStats(ctx, q.Buffer, q.CWD, scanLimit)
+	rows, err := f.stats.PrefixStats(ctx, q.Buffer, q.CWD, q.ProjectRoot, scanLimit)
 	if err != nil {
 		return nil, err
 	}

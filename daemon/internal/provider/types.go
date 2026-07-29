@@ -33,6 +33,12 @@ type Query struct {
 	LastExit int
 	Session  string
 	Recent   []string
+
+	// ProjectRoot is CWD's enclosing project (the nearest ancestor holding
+	// a marker like .git), resolved daemon-side — clients send only CWD.
+	// Empty when the directory belongs to no project, which makes ranking
+	// fall back to the pre-Phase-3 global+directory scoring exactly.
+	ProjectRoot string
 }
 
 // Candidate is one ranked suggestion. Text should extend Query.Buffer by

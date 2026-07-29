@@ -15,10 +15,19 @@ type fakeStats struct {
 	recent []store.StatRow // returned by MostRecentPrefix
 }
 
-func (f *fakeStats) PrefixStats(_ context.Context, prefix, cwd string, _ int) ([]store.StatRow, error) {
+// Mirrors the real query's scope: the rollup, the exact cwd, and — when a
+// root is given — anything inside it (path-boundary aware, so a sibling
+// sharing a name prefix is excluded).
+func (f *fakeStats) PrefixStats(_ context.Context, prefix, cwd, root string, _ int) ([]store.StatRow, error) {
+	inProject := func(dir string) bool {
+		return root != "" && (dir == root || strings.HasPrefix(dir, root+"/"))
+	}
 	var out []store.StatRow
 	for _, r := range f.prefix {
-		if strings.HasPrefix(r.Cmd, prefix) && (r.CWD == "" || r.CWD == cwd) {
+		if !strings.HasPrefix(r.Cmd, prefix) {
+			continue
+		}
+		if r.CWD == "" || r.CWD == cwd || inProject(r.CWD) {
 			out = append(out, r)
 		}
 	}

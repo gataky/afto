@@ -34,7 +34,7 @@ func TestIngestMaintainsStatsAndRollup(t *testing.T) {
 	mustIngest(t, s, Event{Cmd: "git status", CWD: "/a", TS: 200})
 	mustIngest(t, s, Event{Cmd: "git status", CWD: "/b", TS: 300})
 
-	rows, err := s.PrefixStats(ctx, "git", "/a", 100)
+	rows, err := s.PrefixStats(ctx, "git", "/a", "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestPrefixRange(t *testing.T) {
 		mustIngest(t, s, Event{Cmd: cmd, TS: 1})
 	}
 
-	rows, err := s.PrefixStats(ctx, "git c", "", 100)
+	rows, err := s.PrefixStats(ctx, "git c", "", "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestIngestSkipsRedacted(t *testing.T) {
 	if ok {
 		t.Fatal("secret-shaped command must be skipped")
 	}
-	rows, err := s.PrefixStats(context.Background(), "export", "", 10)
+	rows, err := s.PrefixStats(context.Background(), "export", "", "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
