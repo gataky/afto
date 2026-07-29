@@ -24,6 +24,9 @@ import (
 type Handler interface {
 	Suggest(ctx context.Context, q provider.Query) []provider.Candidate
 	Record(q Request)
+	// SetAliases installs a session's alias table for annotation. Like
+	// Record it is fire-and-forget and must be cheap.
+	SetAliases(q Request)
 	Version() string
 }
 
@@ -104,6 +107,8 @@ func (s *Server) handle(conn net.Conn) {
 			s.suggest(conn, req)
 		case TypeRecord:
 			s.h.Record(req)
+		case TypeAliases:
+			s.h.SetAliases(req)
 		case TypePing:
 			s.reply(conn, PingResponse{V: V, OK: true, Version: s.h.Version()})
 		default:
@@ -132,14 +137,21 @@ func (s *Server) suggest(conn net.Conn, req Request) {
 		if limit <= 0 {
 			limit = 1
 		}
-		texts := make([]string, 0, limit)
+		fields := make([]TSVCandidate, 0, limit)
 		for _, c := range cands {
-			if len(texts) == limit {
+			if len(fields) == limit {
 				break
 			}
-			texts = append(texts, c.Text)
+			// Notes travel only to clients that asked: a client that
+			// doesn't know the sub-separator would render it as command
+			// text, so silence about notes is the safe default.
+			f := TSVCandidate{Text: c.Text}
+			if req.Notes {
+				f.Note = c.Note
+			}
+			fields = append(fields, f)
 		}
-		if _, err := conn.Write(EncodeTSV(req.ID, texts)); err != nil {
+		if _, err := conn.Write(EncodeTSV(req.ID, fields)); err != nil {
 			s.log.Debug("write failed", "err", err)
 		}
 		return

@@ -14,14 +14,18 @@ import (
 // because the engine returns without it and the shell just shows what came
 // back (possibly nothing).
 type Engine struct {
-	providers []Provider
-	budget    func() time.Duration // func, not value: config hot-reload swaps it
-	log       *slog.Logger
+	providers  []Provider
+	decorators []Decorator
+	budget     func() time.Duration // func, not value: config hot-reload swaps it
+	log        *slog.Logger
 }
 
 func NewEngine(log *slog.Logger, budget func() time.Duration, providers ...Provider) *Engine {
 	return &Engine{providers: providers, budget: budget, log: log}
 }
+
+// Use registers a post-merge decorator (see Decorator). Call before serving.
+func (e *Engine) Use(d ...Decorator) { e.decorators = append(e.decorators, d...) }
 
 // Suggest fans out to all providers and merges. Always returns within the
 // budget (plus scheduling noise); never returns an error — an empty slice
@@ -55,10 +59,19 @@ func (e *Engine) Suggest(ctx context.Context, q Query) []Candidate {
 		case <-ctx.Done():
 			e.log.Debug("latency budget expired; merging partial results",
 				"got", len(all), "budget", e.budget())
-			return merge(all)
+			return e.decorate(q, merge(all))
 		}
 	}
-	return merge(all)
+	return e.decorate(q, merge(all))
+}
+
+// decorate runs the annotation stage over the merged, capped set — after
+// the cap, so no work is spent on candidates nobody will see.
+func (e *Engine) decorate(q Query, cs []Candidate) []Candidate {
+	for _, d := range e.decorators {
+		cs = d.Decorate(q, cs)
+	}
+	return cs
 }
 
 // merge dedupes identical texts (keeping the max score — providers score on

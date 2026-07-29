@@ -162,6 +162,11 @@ func runServe(ctx context.Context, o serveOpts) error {
 		return time.Duration(mgr.Get().LatencyBudgetMS) * time.Millisecond
 	}
 	engine := provider.NewEngine(log, budget, providers...)
+	var aliases *provider.AliasNote
+	if pc.AliasNote {
+		aliases = provider.NewAliasNote()
+		engine.Use(aliases)
+	}
 
 	l, err := net.Listen("unix", o.socket)
 	if err != nil {
@@ -171,6 +176,7 @@ func runServe(ctx context.Context, o serveOpts) error {
 		engine:   engine,
 		st:       st,
 		projects: project.New(mgr.Get().Project.Markers),
+		aliases:  aliases,
 		log:      log,
 		version:  o.version,
 	}, log)
@@ -198,6 +204,7 @@ type core struct {
 	engine   *provider.Engine
 	st       *store.Store
 	projects *project.Resolver
+	aliases  *provider.AliasNote // nil when the alias_note decorator is off
 	log      *slog.Logger
 	version  string
 }
@@ -231,6 +238,18 @@ func (c *core) Record(r ipc.Request) {
 	if !ok {
 		c.log.Debug("command skipped by redaction")
 	}
+}
+
+// SetAliases stores a shell's alias table for annotation. Aliases are
+// session-scoped in-memory state: they are user configuration rather than
+// command history, so nothing here touches the store or the log's info
+// level (an alias body can be as private as a command line).
+func (c *core) SetAliases(r ipc.Request) {
+	if c.aliases == nil {
+		return
+	}
+	c.aliases.Set(r.Session, r.Map)
+	c.log.Debug("alias table updated", "session", r.Session, "entries", len(r.Map))
 }
 
 func (c *core) Version() string { return c.version }

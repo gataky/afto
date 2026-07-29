@@ -54,6 +54,7 @@ const (
 	TypeSuggest = "suggest"
 	TypeRecord  = "record"
 	TypePing    = "ping"
+	TypeAliases = "aliases"
 )
 
 // Response formats for suggest.
@@ -89,6 +90,7 @@ type Request struct {
 	ID       int64    `json:"id,omitempty"`
 	Fmt      string   `json:"fmt,omitempty"`
 	Limit    int      `json:"limit,omitempty"`
+	Notes    bool     `json:"notes,omitempty"`
 	Buffer   string   `json:"buffer,omitempty"`
 	Cursor   int      `json:"cursor,omitempty"`
 	CWD      string   `json:"cwd,omitempty"`
@@ -100,6 +102,11 @@ type Request struct {
 	Cmd  string `json:"cmd,omitempty"`
 	Exit int    `json:"exit,omitempty"`
 	TS   int64  `json:"ts,omitempty"`
+
+	// aliases: the shell's alias table, so the daemon can annotate
+	// candidates with what they expand to. Per-session, in memory only,
+	// never persisted — see the alias-note decorator.
+	Map map[string]string `json:"map,omitempty"`
 }
 
 // Query converts a suggest request to the domain query.
