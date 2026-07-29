@@ -237,6 +237,93 @@ else
   pass "isolation grep clean"
 fi
 
+# --- S13: next-command prediction — empty prompt is silent until ^O ---------------
+# Transitions can only be learned from EXECUTED commands: HISTFILE import is
+# excluded from learning by design (a history file interleaves terminals, so
+# consecutive lines are not causally related). So build the pair for real.
+for i in 1 2; do
+  zpty -w z "true trans-first"; sleep 0.6
+  zpty -w z "true trans-second && print SEED''-RAN"; sleep 0.8
+done
+zpty -w z "true trans-first"; sleep 0.8; drain
+
+# Nothing may appear under a bare prompt: predictions are opt-in, because
+# rows under every fresh prompt would move the prompt after every command.
+mark=$(( ${#CAP} + 1 ))
+sleep 0.6; drain
+print -rn -- ${CAP[$mark,-1]} > $D/seg.tmp
+if perl -0777 -ne 'exit(/▸/ ? 0 : 1)' $D/seg.tmp; then
+  fail "empty prompt silent without ^O"
+else
+  pass "empty prompt silent without ^O"
+fi
+
+zpty -wn z $'\x0f'          # ^O: ask what usually comes next
+sleep 1.2; drain
+if stripped | grep -q -- "▸ true trans-second"; then
+  pass "^O predicted the next command from a learned pair"
+else
+  fail "^O predicted the next command from a learned pair"
+fi
+# Accepting a prediction is menu-only and must not execute it.
+nseed=$(count_marker SEED-RAN)
+enter
+sleep 0.6; drain
+if (( $(count_marker SEED-RAN) == nseed )); then
+  pass "menu Enter accepted the prediction without executing"
+else
+  fail "menu Enter accepted the prediction without executing"
+fi
+enter
+sleep 1; drain
+if (( $(count_marker SEED-RAN) > nseed )); then
+  pass "accepted prediction executes on the next Enter"
+else
+  fail "accepted prediction executes on the next Enter"
+fi
+
+# --- S14: a prediction can never be taken by a ghost-accept key --------------------
+# Predictions don't extend the buffer, so the client leaves the ghost empty;
+# the accept widgets consume the ghost, which is what makes them unreachable
+# (DESIGN.md §2.4.3). ^O, Esc back to a bare prompt, then ^] must do nothing.
+zpty -wn z $'\x0f'; sleep 1.0
+zpty -wn z $'\e';   sleep 0.5
+zpty -wn z $'\x1d'  # accept key: must not put a prediction in the buffer
+sleep 0.4
+typeslow "print GHOST''-SAFE"; enter
+sleep 1; drain
+# The recorded command is the buffer as executed. It must be exactly what
+# was typed — had ^] taken the prediction, the buffer would carry
+# "true trans-second …" too. (Note the trace stores text as TYPED, so the
+# quote-split is present here; only the marker's OUTPUT is unsplit.)
+last_record=$(grep -o 'record {.*}' $D/client.trace | tail -1)
+if [[ $last_record == *"GHOST''-SAFE"* && $last_record != *trans-second* ]]; then
+  pass "accept key could not take a non-extending prediction"
+else
+  fail "accept key could not take a non-extending prediction"
+fi
+
+# --- S15: alias expansion notes ---------------------------------------------------
+zpty -w z "alias tq='true q'"; sleep 0.5
+zpty -w z "tq alias-marker"; sleep 0.9; drain
+typeslow "tq al"
+sleep 0.9; drain
+if stripped | grep -q -- "▸ tq alias-marker  tq = true q"; then
+  pass "row shows the alias expansion as a note"
+else
+  fail "row shows the alias expansion as a note"
+fi
+# The note is display text: accepting must put ONLY the command in the
+# buffer, which the recorded command proves exactly.
+zpty -wn z $'\x1d'
+sleep 0.3; enter
+sleep 1; drain
+if grep -q 'record.*"cmd":"tq alias-marker"' $D/client.trace; then
+  pass "accepting an annotated row takes the command, not the note"
+else
+  fail "accepting an annotated row takes the command, not the note"
+fi
+
 # --- S12: coexistence — fzf/zsh-syntax-highlighting loaded alongside afto ----------
 # DESIGN.md §6 wants the checklist run with these loaded. Each tool is
 # gated on availability so the harness stays green on machines without
