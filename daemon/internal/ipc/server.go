@@ -121,15 +121,31 @@ func (s *Server) suggest(conn net.Conn, req Request) {
 	s.log.Debug("suggest handled", "id", req.ID, "buffer_len", len(req.Buffer),
 		"candidates", len(cands), "took", time.Since(start))
 
+	// Limit semantics: a positive limit caps either format; absent keeps
+	// each format's historical default (TSV top-1 for Phase 1 clients,
+	// JSON everything for `aftod query` and tests).
+	limit := req.Limit
+	if limit > provider.CandidateLimit {
+		limit = provider.CandidateLimit
+	}
 	if req.Fmt == FmtTSV {
-		text := ""
-		if len(cands) > 0 {
-			text = cands[0].Text
+		if limit <= 0 {
+			limit = 1
 		}
-		if _, err := conn.Write(EncodeTSV(req.ID, text)); err != nil {
+		texts := make([]string, 0, limit)
+		for _, c := range cands {
+			if len(texts) == limit {
+				break
+			}
+			texts = append(texts, c.Text)
+		}
+		if _, err := conn.Write(EncodeTSV(req.ID, texts)); err != nil {
 			s.log.Debug("write failed", "err", err)
 		}
 		return
+	}
+	if limit > 0 && len(cands) > limit {
+		cands = cands[:limit]
 	}
 	s.reply(conn, SuggestResponse{V: V, ID: req.ID, Candidates: toWire(cands)})
 }

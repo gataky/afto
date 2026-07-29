@@ -19,6 +19,11 @@ package provider
 
 import "context"
 
+// CandidateLimit caps ranked candidates at every layer: what a single
+// provider returns, what the engine's merge emits, and the largest "limit" a
+// client may request over the wire (ipc clamps to it).
+const CandidateLimit = 10
+
 // Query is the context a suggestion is computed from. It already carries
 // everything a future AI provider would need; extending it is additive.
 type Query struct {

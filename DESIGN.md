@@ -83,7 +83,9 @@ $ git ch█eckout main              ← buffer + dim ghost
 ```
 
 While the list is visible, **no keys are claimed**: TAB completes natively, arrows do
-history, typing refines the list. Config: `menu.passive_rows = 0..10` (0 = ghost-only).
+history, typing refines the list. Config: `AFTO_ROWS=0..10` (client env var, default 4,
+0 = ghost-only — rendering is purely client-side, so the knob lives in the shell, not
+in the daemon's config.toml).
 Known tradeoffs vs IRIS: rows scroll the screen at the bottom edge (no floating
 overlay), and styling is color/bold rather than icon fonts. True floating panels
 (kitty/wezterm protocols) are a future plugin, not core.
@@ -262,14 +264,15 @@ afto/
 - **Phase 0 — PoC (done):** UI contract validated under a scripted PTY: ghost text
   via `POSTDISPLAY`, accept at EOL/`^]`, TAB native throughout (`vim .z<TAB>` passes),
   isolation grep clean.
-- **Phase 1 — Daemon + async client:** `aftod` with `history` + `frecency`
+- **Phase 1 — Daemon + async client (done):** `aftod` with `history` + `frecency`
   providers, HISTFILE import, redaction, `precmd` ingestion; zsh plugin switches to
   async socket fetch (`zle -F`) with staleness checks. Ghost text only. Exit
   criteria: p99 keystroke→ghost < 50 ms; non-disruption checklist passes.
-- **Phase 2 — Native dropdown:** passive tier-2 list (multi-line `POSTDISPLAY` +
+  (`plans/phase-1-report.md`)
+- **Phase 2 — Native dropdown (done):** passive tier-2 list (multi-line `POSTDISPLAY` +
   `region_highlight` rows) and tier-3 menu mode (custom keymap via `^O`). Exit
   criteria: checklist passes *with the list visible*; menu mode never activates
-  without explicit entry.
+  without explicit entry. (`plans/phase-2-report.md`)
 - **Phase 3 — Context intelligence:** cwd/project-affinity ranking, `transition`
   provider (empty-prompt next-command rows in the menu), alias-expansion notes.
 - **Phase 4 — Plugin host + fzf widget:** subprocess plugin runtime with circuit

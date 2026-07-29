@@ -39,18 +39,20 @@ You type the `h` in `git ch`:
     │  line-pre-redraw hook fires               │
     │                                           │
     │ {"v":1,"type":"suggest","id":42,          │
-    │  "fmt":"tsv","buffer":"git ch",           │
+    │  "fmt":"tsv","limit":4,"buffer":"git ch", │
     │  "cursor":6,"cwd":"/Users/x/proj",        │
     │  "last_exit":0,"session":"host.81021..."} │
     │──────────────────────────────────────────▶│
     │                                           │ race providers vs
     │                                           │ latency budget
-    │                 "42\tgit checkout main\n" │
+    │      "42\tgit checkout main\tgit cherry-  │
+    │       pick abc123\tgit checkout -b x\n"   │
     │◀──────────────────────────────────────────│
     │  zle -F handler wakes:                    │
     │   id matches in-flight request?           │
-    │   text still extends current $BUFFER?     │
-    │   → render "eckout main" as dim ghost     │
+    │   texts still extend current $BUFFER?     │
+    │   → render "eckout main" as dim ghost,    │
+    │     survivors as passive list rows        │
 ```
 
 **Why the request is JSON but the response is TSV:** the two directions are
@@ -58,18 +60,23 @@ not equally hard in zsh. *Building* JSON is string interpolation into a
 template plus a few escaping parameter expansions. *Parsing* JSON needs a
 real parser or a forked helper — and forking on every keystroke is forbidden
 (the keystroke path must never block or spawn). A TSV response
-(`<id>\t<escaped text>\n`) parses with two parameter expansions. Clients
-that can afford real parsing (tests, `aftod query`, the future fzf widget)
-omit `fmt` and get JSON:
+(`<id>\t<escaped text>[\t<escaped text>…]\n`) parses with a tab split plus
+an unescape per field. Clients that can afford real parsing (tests,
+`aftod query`, the future fzf widget) omit `fmt` and get JSON:
 
 ```json
 {"v":1,"id":42,"candidates":[{"text":"git checkout main","score":8.1,"source":"frecency"}]}
 ```
 
-TSV carries only the top candidate — ghost text can only display one
-suggestion anyway. Escaping contract: literal `\t`, `\n`, `\` in the text
-become two-character escapes (`\t`, `\n`, `\\`), so the first unescaped tab
-is always the separator and an embedded newline can never break framing.
+**How many candidates come back** is the client's call, via the optional
+`limit` field (clamped daemon-side to the engine's cap of 10). The ghost
+renders from the first candidate; the passive list rows (Phase 2) render
+from the rest. A request without `limit` keeps each format's historical
+default — top-1 for TSV (so a Phase 1 client is served unchanged),
+everything for JSON. Escaping contract: literal `\t`, `\n`, `\` in the text
+become two-character escapes (`\t`, `\n`, `\\`), so every real tab byte on
+the line is a field separator and an embedded newline can never break
+framing. Zero candidates is `<id>\t\n` — one empty field.
 
 ## Flow control: one in flight + dirty flag
 
@@ -120,7 +127,10 @@ enter reconnect backoff.
 
 - New context for providers (e.g. git state) = new optional request fields.
   Old daemons ignore them; new daemons tolerate their absence. Bump `v` only
-  for changes that break this tolerance.
+  for changes that break this tolerance. (`limit`, added in Phase 2, is the
+  worked example: an old daemon ignores it and answers top-1 TSV, which a
+  new client renders as a one-row list; a new daemon without `limit` serves
+  a Phase 1 client exactly as before.)
 - The AI provider (Phase 5) needs **no** protocol change: `buffer`, `cwd`,
   `recent`, `last_exit` are already on every suggest request.
 - Phase 4 plugins reuse `Query`/`Candidate` JSON shapes over stdio, so a

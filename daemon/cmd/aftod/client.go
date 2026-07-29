@@ -69,6 +69,7 @@ func cmdQuery(args []string) error {
 	socket := fs.String("socket", socketPath(), "daemon socket path")
 	buffer := fs.String("buffer", "", "command-line prefix to suggest for (required)")
 	cwd := fs.String("cwd", "", "working directory context")
+	limit := fs.Int("limit", 0, "max candidates (0 = all, capped at 10)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -80,7 +81,7 @@ func cmdQuery(args []string) error {
 	}
 	line, err := roundTrip(*socket, ipc.Request{
 		V: ipc.V, Type: ipc.TypeSuggest, ID: 1,
-		Buffer: *buffer, Cursor: len(*buffer), CWD: *cwd,
+		Buffer: *buffer, Cursor: len(*buffer), CWD: *cwd, Limit: *limit,
 	})
 	if err != nil {
 		return err

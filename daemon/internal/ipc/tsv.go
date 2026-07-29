@@ -5,22 +5,40 @@ import (
 	"strings"
 )
 
-// EncodeTSV renders a suggest response in TSV format: "<id>\t<escaped-text>\n".
+// EncodeTSV renders a suggest response in TSV format:
+// "<id>\t<escaped-text>[\t<escaped-text>…]\n".
 //
 // This format exists for exactly one consumer: the zsh plugin's zle -F
 // response handler, which must parse a reply using only parameter expansion
-// (no forks allowed in the keystroke path). It carries only the top
-// candidate because ghost text can display only one suggestion anyway;
-// clients that want the full ranked list use the default JSON format.
+// (no forks allowed in the keystroke path). Phase 1 carried only the top
+// candidate; since Phase 2 it carries as many as the client asked for via
+// the request's "limit" (the ghost still uses the first, the passive list
+// rows use the rest). Clients that want scores/sources use the default JSON
+// format.
 //
-// Escaping contract (must match _afto_unescape in the zsh plugin): literal
-// \t, \n and \ in the text become the two-character sequences \t, \n, \\ so
-// that the first unescaped tab is always the id/text separator and an
-// embedded newline can never break line framing. A multiline suggestion
-// therefore survives transport intact — and is then rejected client-side by
-// the prefix invariant, since the buffer is guarded to be single-line.
-func EncodeTSV(id int64, text string) []byte {
-	return []byte(fmt.Sprintf("%d\t%s\n", id, escapeTSV(text)))
+// Escaping contract (must match _afto_tsv_unescape in the zsh plugin):
+// literal \t, \n and \ in the text become the two-character sequences \t,
+// \n, \\ — so every real tab byte on the line is a field separator, and an
+// embedded newline can never break line framing. That is what lets the
+// client split the whole line on plain tab before unescaping each field.
+// A multiline suggestion therefore survives transport intact — and is then
+// rejected client-side by the prefix invariant, since the buffer is guarded
+// to be single-line.
+//
+// Zero candidates encode as "<id>\t\n": the line always has at least one
+// (possibly empty) text field, which Phase 1 clients relied on.
+func EncodeTSV(id int64, texts []string) []byte {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d", id)
+	if len(texts) == 0 {
+		b.WriteByte('\t')
+	}
+	for _, t := range texts {
+		b.WriteByte('\t')
+		b.WriteString(escapeTSV(t))
+	}
+	b.WriteByte('\n')
+	return []byte(b.String())
 }
 
 func escapeTSV(s string) string {

@@ -30,13 +30,31 @@ func TestTSVRoundTrip(t *testing.T) {
 }
 
 func TestEncodeTSVFraming(t *testing.T) {
-	got := string(EncodeTSV(42, "a\tb\nc"))
+	got := string(EncodeTSV(42, []string{"a\tb\nc"}))
 	want := "42\ta\\tb\\nc\n"
 	if got != want {
 		t.Fatalf("EncodeTSV = %q, want %q", got, want)
 	}
 	if got[len(got)-1] != '\n' {
 		t.Fatal("response must be newline-terminated")
+	}
+}
+
+func TestEncodeTSVMultiCandidate(t *testing.T) {
+	// Every real tab byte on the wire must be a separator: candidates with
+	// literal tabs/newlines/backslashes arrive escaped, so a client that
+	// splits the line on plain tab gets exactly the fields back.
+	got := string(EncodeTSV(7, []string{"git checkout main", "a\tb", `a\b`}))
+	want := "7\tgit checkout main\ta\\tb\ta\\\\b\n"
+	if got != want {
+		t.Fatalf("EncodeTSV = %q, want %q", got, want)
+	}
+}
+
+func TestEncodeTSVZeroCandidates(t *testing.T) {
+	// The empty response keeps its Phase 1 shape: one empty text field.
+	if got := string(EncodeTSV(9, nil)); got != "9\t\n" {
+		t.Fatalf("EncodeTSV = %q, want %q", got, "9\t\n")
 	}
 }
 

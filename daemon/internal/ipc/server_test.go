@@ -99,6 +99,43 @@ func TestSuggestTSV(t *testing.T) {
 	}
 }
 
+func TestSuggestTSVLimit(t *testing.T) {
+	conn, _ := startServer(t)
+	r := bufio.NewReader(conn)
+
+	// limit > 1 → multiple tab-separated candidates on one line
+	send(t, conn, `{"v":1,"type":"suggest","id":11,"fmt":"tsv","buffer":"git ch","limit":4}`)
+	if got, want := readLine(t, r), "11\tgit ch --verbose\tgit ch --help"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+
+	// limit larger than the engine cap is clamped, not an error
+	send(t, conn, `{"v":1,"type":"suggest","id":12,"fmt":"tsv","buffer":"git ch","limit":999}`)
+	if got, want := readLine(t, r), "12\tgit ch --verbose\tgit ch --help"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+
+	// limit with zero candidates keeps the Phase 1 empty shape
+	send(t, conn, `{"v":1,"type":"suggest","id":13,"fmt":"tsv","buffer":"none","limit":4}`)
+	if got, want := readLine(t, r), "13\t"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestSuggestJSONLimit(t *testing.T) {
+	conn, _ := startServer(t)
+	r := bufio.NewReader(conn)
+
+	send(t, conn, `{"v":1,"type":"suggest","id":14,"buffer":"git ch","limit":1}`)
+	var resp SuggestResponse
+	if err := json.Unmarshal([]byte(readLine(t, r)), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.ID != 14 || len(resp.Candidates) != 1 || resp.Candidates[0].Text != "git ch --verbose" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
 func TestSuggestJSON(t *testing.T) {
 	conn, _ := startServer(t)
 	r := bufio.NewReader(conn)

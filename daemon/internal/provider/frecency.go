@@ -71,8 +71,8 @@ func (f *Frecency) Suggest(ctx context.Context, q Query) ([]Candidate, error) {
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
-	if len(out) > candidateLimit {
-		out = out[:candidateLimit]
+	if len(out) > CandidateLimit {
+		out = out[:CandidateLimit]
 	}
 	return out, nil
 }
