@@ -23,9 +23,18 @@ import (
 
 var version = "dev"
 
-// run dispatches subcommands; implemented incrementally (see plans/phase-1.md).
-var run = func(cmd string, args []string) error {
-	return fmt.Errorf("%s: not implemented yet", cmd)
+func run(cmd string, args []string) error {
+	switch cmd {
+	case "serve":
+		return cmdServe(args)
+	case "import":
+		return cmdImport(args)
+	case "query":
+		return cmdQuery(args)
+	case "ping":
+		return cmdPing(args)
+	}
+	return fmt.Errorf("unknown command %q", cmd)
 }
 
 func usage() {
