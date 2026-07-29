@@ -18,10 +18,6 @@ type statsReader interface {
 	MostRecentPrefix(ctx context.Context, prefix string, limit int) ([]store.StatRow, error)
 }
 
-// candidateLimit caps what any single provider returns; the engine caps the
-// merged set to the same number.
-const candidateLimit = 10
-
 // History suggests the most recently used commands matching the buffer —
 // pure recency, no frequency weighting. It exists for two reasons:
 //
@@ -49,7 +45,7 @@ func (h *History) Suggest(ctx context.Context, q Query) ([]Candidate, error) {
 	if q.Buffer == "" {
 		return nil, nil
 	}
-	rows, err := h.stats.MostRecentPrefix(ctx, q.Buffer, candidateLimit)
+	rows, err := h.stats.MostRecentPrefix(ctx, q.Buffer, CandidateLimit)
 	if err != nil {
 		return nil, err
 	}

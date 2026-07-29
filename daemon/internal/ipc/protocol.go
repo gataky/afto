@@ -69,7 +69,11 @@ const (
 //
 // Fields for "suggest": ID correlates the response to the request so a
 // client can discard stale replies (the zsh client bumps it every request
-// and ignores mismatches). Buffer/Cursor are the live command line. CWD,
+// and ignores mismatches). Limit is how many candidates the client wants
+// back (clamped to provider.CandidateLimit; absent means the format's
+// historical default — 1 for TSV, everything for JSON — so Phase 1 clients
+// and `aftod query` behave unchanged). Buffer/Cursor are the live command
+// line. CWD,
 // LastExit, Session and Recent exist so providers can rank by context —
 // they are already sufficient for the future AI provider, which is what
 // keeps that addition protocol-compatible.
@@ -84,6 +88,7 @@ type Request struct {
 	// suggest
 	ID       int64    `json:"id,omitempty"`
 	Fmt      string   `json:"fmt,omitempty"`
+	Limit    int      `json:"limit,omitempty"`
 	Buffer   string   `json:"buffer,omitempty"`
 	Cursor   int      `json:"cursor,omitempty"`
 	CWD      string   `json:"cwd,omitempty"`

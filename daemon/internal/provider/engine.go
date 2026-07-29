@@ -79,8 +79,8 @@ func merge(cs []Candidate) []Candidate {
 		out = append(out, c)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
-	if len(out) > candidateLimit {
-		out = out[:candidateLimit]
+	if len(out) > CandidateLimit {
+		out = out[:CandidateLimit]
 	}
 	return out
 }

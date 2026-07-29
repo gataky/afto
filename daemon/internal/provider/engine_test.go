@@ -93,8 +93,8 @@ func TestEngineCapsMergedSet(t *testing.T) {
 	}
 	got := NewEngine(testLog(), budget(time.Second), &stubProvider{name: "many", cs: cs}).
 		Suggest(context.Background(), Query{Buffer: "cmd"})
-	if len(got) != candidateLimit {
-		t.Fatalf("want cap %d, got %d", candidateLimit, len(got))
+	if len(got) != CandidateLimit {
+		t.Fatalf("want cap %d, got %d", CandidateLimit, len(got))
 	}
 	if got[0].Text != "cmd-29" {
 		t.Fatalf("cap must keep the best, got %+v", got[0])
