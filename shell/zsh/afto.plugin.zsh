@@ -367,5 +367,9 @@ zle -N _afto_process
 bindkey "$AFTO_ACCEPT_KEY" afto-accept
 
 # Optimistic connect so the first keystroke already has a live socket (and
-# a cold system starts the daemon now rather than mid-typing).
+# a cold system starts the daemon now rather than mid-typing). On a cold
+# start this fails (the daemon is still coming up) and that is fine — but a
+# sourced plugin must never leak a failure status to `source`, so end the
+# file successfully regardless.
 _afto_connect 2>/dev/null
+return 0

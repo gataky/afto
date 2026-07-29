@@ -11,15 +11,15 @@ import (
 // suggestion. Users extend (not replace) this list via config
 // [redact].extra_patterns.
 var defaultPatterns = []string{
-	`AKIA[0-9A-Z]{16}`,          // AWS access key id
-	`(?i)aws_secret`,            // AWS secret key mentions
-	`(?i)(--password|--token|--secret|--api-key)[= ]\S`, // credential flags with a value
-	`(?i)authorization:\s*(bearer|basic)`,               // HTTP auth headers (curl -H ...)
+	`AKIA[0-9A-Z]{16}`, // AWS access key id
+	`(?i)aws_secret`,   // AWS secret key mentions
+	`(?i)(--password|--token|--secret|--api-key)[= ]\S`,   // credential flags with a value
+	`(?i)authorization:\s*(bearer|basic)`,                 // HTTP auth headers (curl -H ...)
 	`(?i)^\s*export\s+\w*(TOKEN|SECRET|KEY|PASSWORD)\w*=`, // exporting secret-named vars
-	`xox[baprs]-`,               // Slack tokens
-	`ghp_[A-Za-z0-9]{36}`,       // GitHub classic PAT
-	`github_pat_`,               // GitHub fine-grained PAT
-	`^ `,                        // leading space: the user asked the shell to forget it; honor that
+	`xox[baprs]-`,         // Slack tokens
+	`ghp_[A-Za-z0-9]{36}`, // GitHub classic PAT
+	`github_pat_`,         // GitHub fine-grained PAT
+	`^ `,                  // leading space: the user asked the shell to forget it; honor that
 }
 
 // Redactor decides whether a command line may be persisted.

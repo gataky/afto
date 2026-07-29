@@ -41,7 +41,7 @@ var extendedRe = regexp.MustCompile(`^: (\d+):(\d+);(.*)$`)
 //     every multibyte command would import corrupted.
 //
 // Redaction applies to every command. Events rows get session='import' and
-// cwd='' (the original directories are unknowable). Aggregation happens in
+// cwd=” (the original directories are unknowable). Aggregation happens in
 // memory first, then one transaction writes everything — importing a
 // 100k-line histfile stays in the low seconds.
 func (s *Store) ImportHistfile(ctx context.Context, path string) (ImportStats, error) {

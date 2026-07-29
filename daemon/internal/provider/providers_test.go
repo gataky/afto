@@ -39,12 +39,14 @@ var testNow = time.Unix(1_722_200_000, 0)
 
 func fixedNow() time.Time { return testNow }
 
-func ts(ageHours float64) int64 { return testNow.Add(-time.Duration(ageHours * float64(time.Hour))).Unix() }
+func ts(ageHours float64) int64 {
+	return testNow.Add(-time.Duration(ageHours * float64(time.Hour))).Unix()
+}
 
 func TestHistoryProvider(t *testing.T) {
 	h := NewHistory(&fakeStats{recent: []store.StatRow{
 		{Cmd: "git checkout main", Count: 3, LastTS: ts(1)},
-		{Cmd: "git ch", Count: 1, LastTS: ts(2)},                    // == buffer, must drop
+		{Cmd: "git ch", Count: 1, LastTS: ts(2)},                      // == buffer, must drop
 		{Cmd: "git checkout -b x\ngit push", Count: 1, LastTS: ts(3)}, // multiline, must drop
 		{Cmd: "git cherry-pick abc", Count: 1, LastTS: ts(4)},
 	}})
